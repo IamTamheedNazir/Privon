@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 ## Private Compute Network MVP
 
 This repository contains a small MVP for the PCN architecture:
@@ -154,3 +155,45 @@ Response:
 - The client-side splitting step is where the raw query is handled.
 - The coordinator can use the aggregator API when `AGGREGATOR_URL` is set, or fall back to local merging when it is not.
 - The coordinator now uses opaque job and task identifiers so metadata does not reveal fragment text.
+=======
+# Privon — Private Compute Network (PCN)
+
+Privon is a privacy-first distributed compute network that splits tasks across multiple nodes to prevent full data exposure and ensure secure processing.
+
+---
+
+## 🚀 Overview
+
+Privon (PCN) is an experimental infrastructure project designed to:
+
+- Protect user data during computation
+- Distribute workloads across independent nodes
+- Avoid centralized data processing
+- Enable privacy-preserving compute systems
+
+Instead of sending full data to a single server, Privon:
+
+1. Splits data into fragments  
+2. Distributes fragments across nodes  
+3. Processes them independently  
+4. Merges results into a final output  
+
+---
+
+## 🧠 Why Privon?
+
+Traditional systems:
+- Centralized ❌
+- Data exposed ❌
+- Privacy risk ❌
+
+Privon:
+- Distributed ✅
+- Fragmented data ✅
+- Privacy-first design ✅
+
+---
+
+## 🏗️ Architecture
+
+>>>>>>> 3ab3de59642e2bce1671cb1a01d8a9a8e76b92b1

@@ -3,10 +3,25 @@ const THEMES = [
   { id: "voltage", label: "Voltage" },
   { id: "paper", label: "Paper" },
 ];
-const REFRESH_MS = 3000;
+const API_KEY_STORAGE_KEY = "privon-dashboard-api-key";
+const STREAM_RECONNECT_DELAY_MS = 2500;
 
 const state = {
   theme: localStorage.getItem("privon-theme") || "nocturne",
+  apiKey: sessionStorage.getItem(API_KEY_STORAGE_KEY) || "",
+  connected: false,
+  eventSource: null,
+  reconnectTimer: null,
+  snapshot: {
+    nodes: [],
+    stats: {
+      summary: {},
+      replicaGroups: [],
+      shardSummaries: [],
+      recentExecutions: [],
+    },
+    logs: [],
+  },
 };
 
 const themeSwitcher = document.getElementById("theme-switcher");
@@ -16,9 +31,21 @@ const taskStream = document.getElementById("task-stream");
 const logConsole = document.getElementById("log-console");
 const laneList = document.getElementById("lane-list");
 const replicaLanes = document.getElementById("replica-lanes");
+const shardChart = document.getElementById("shard-chart");
 const lastUpdated = document.getElementById("last-updated");
+const authShell = document.getElementById("auth-shell");
+const workspace = document.getElementById("workspace");
+const authForm = document.getElementById("auth-form");
+const apiKeyInput = document.getElementById("api-key-input");
+const authStatus = document.getElementById("auth-status");
+const connectButton = document.getElementById("connect-button");
+const connectionPill = document.getElementById("connection-pill");
 
 function formatRelativeTime(timestamp) {
+  if (!timestamp) {
+    return "waiting";
+  }
+
   const deltaSeconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
 
   if (deltaSeconds < 5) {
@@ -60,6 +87,39 @@ function renderThemeButtons() {
 
 function statusClass(status) {
   return `status-${status || "inactive"}`;
+}
+
+function setLastUpdated(timestamp = Date.now()) {
+  lastUpdated.textContent = `updated ${formatRelativeTime(timestamp)}`;
+}
+
+function setConnectionState(mode, message) {
+  const labels = {
+    locked: "locked",
+    connecting: "connecting",
+    live: "live stream",
+    degraded: "reconnecting",
+  };
+  const className = mode === "live"
+    ? "status-active"
+    : mode === "connecting"
+      ? "status-probation"
+      : mode === "degraded"
+        ? "status-probation"
+        : "status-inactive";
+
+  connectionPill.className = `connection-pill ${className}`;
+  connectionPill.textContent = labels[mode] || mode;
+
+  if (message) {
+    authStatus.textContent = message;
+  }
+}
+
+function updateVisibility() {
+  const hasSession = state.connected;
+  workspace.hidden = !hasSession;
+  authShell.hidden = hasSession;
 }
 
 function renderSummary(stats) {
@@ -178,76 +238,315 @@ function renderLogs(logs) {
   `).join("");
 }
 
-function renderReplicaLanes(nodes) {
-  const grouped = nodes.reduce((accumulator, node) => {
-    const key = node.replicaGroup || "default-replica";
-    if (!accumulator[key]) {
-      accumulator[key] = [];
-    }
-    accumulator[key].push(node);
-    return accumulator;
-  }, {});
-
-  const entries = Object.entries(grouped);
-
-  if (!entries.length) {
-    laneList.innerHTML = createEmptyState("Replica groups will appear once nodes register.");
-    replicaLanes.innerHTML = createEmptyState("Waiting for replica metadata.");
+function renderReplicaHealth(replicaGroups) {
+  if (!replicaGroups.length) {
+    replicaLanes.innerHTML = createEmptyState("Replica groups will appear once nodes register.");
+    laneList.innerHTML = createEmptyState("Waiting for replica metadata.");
     return;
   }
 
-  laneList.innerHTML = entries.map(([groupName, members]) => `
-    <article class="lane-item">
-      <div class="lane-head">
-        <strong>${groupName}</strong>
-        <span class="meta">${members.length} node(s)</span>
-      </div>
-      <div class="inline-list">${members.map((member) => `<span class="inline-tag">${member.shardId}</span>`).join("")}</div>
-    </article>
-  `).join("");
-
-  replicaLanes.innerHTML = entries.map(([groupName, members]) => {
-    const activeCount = members.filter((member) => member.status === "active").length;
-    const barWidth = Math.max(12, Math.round((activeCount / members.length) * 100));
+  replicaLanes.innerHTML = replicaGroups.map((group) => {
+    const healthWidth = Math.max(10, Math.round((group.activeNodes / Math.max(1, group.totalNodes)) * 100));
     return `
       <article class="lane-pill">
         <div class="lane-head">
-          <strong>${groupName}</strong>
-          <span class="meta">${activeCount}/${members.length} active</span>
+          <strong>${group.key}</strong>
+          <span class="meta">${group.activeNodes}/${group.totalNodes} active</span>
         </div>
-        <div class="lane-bar"><span style="width:${barWidth}%"></span></div>
-        <span class="meta">${members.map((member) => member.url.split(":").slice(-1)[0]).join(" · ")}</span>
+        <div class="lane-bar"><span style="width:${healthWidth}%"></span></div>
+        <div class="lane-meta-grid">
+          <span class="meta">avg score ${group.averageScore}</span>
+          <span class="meta">${group.tasksHandled} tasks</span>
+        </div>
+      </article>
+    `;
+  }).join("");
+
+  laneList.innerHTML = replicaGroups.map((group) => `
+    <article class="lane-item">
+      <div class="lane-head">
+        <strong>${group.key}</strong>
+        <span class="meta">${group.probationNodes} probation · ${group.inactiveNodes} inactive</span>
+      </div>
+      <div class="inline-list">${group.members.map((member) => `<span class="inline-tag ${statusClass(member.status)}">${member.shardId}</span>`).join("")}</div>
+    </article>
+  `).join("");
+}
+
+function renderShardCharts(shardSummaries) {
+  if (!shardSummaries.length) {
+    shardChart.innerHTML = createEmptyState("Shard charts appear once nodes report shard metadata.");
+    return;
+  }
+
+  const maxTasks = Math.max(...shardSummaries.map((summary) => summary.tasksHandled || 0), 1);
+
+  shardChart.innerHTML = shardSummaries.map((summary) => {
+    const loadWidth = Math.max(8, Math.round(((summary.tasksHandled || 0) / maxTasks) * 100));
+    const scoreWidth = Math.max(8, Math.round((summary.averageScore / 200) * 100));
+    return `
+      <article class="shard-card">
+        <div class="lane-head">
+          <strong>${summary.key}</strong>
+          <span class="meta">${summary.totalNodes} node(s)</span>
+        </div>
+        <div class="chart-row">
+          <span class="mini-label">task share</span>
+          <div class="chart-track load"><span style="width:${loadWidth}%"></span></div>
+          <span class="meta">${summary.tasksHandled}</span>
+        </div>
+        <div class="chart-row">
+          <span class="mini-label">score</span>
+          <div class="chart-track score"><span style="width:${scoreWidth}%"></span></div>
+          <span class="meta">${summary.averageScore}</span>
+        </div>
       </article>
     `;
   }).join("");
 }
 
-async function refresh() {
-  try {
-    const [nodesResponse, statsResponse, logsResponse] = await Promise.all([
-      fetch("/dashboard/nodes"),
-      fetch("/dashboard/stats"),
-      fetch("/dashboard/logs?limit=24"),
-    ]);
+function render(snapshot) {
+  const nodes = snapshot.nodes || [];
+  const stats = snapshot.stats || {};
+  const logs = snapshot.logs || [];
 
-    const [nodesData, statsData, logsData] = await Promise.all([
-      nodesResponse.json(),
-      statsResponse.json(),
-      logsResponse.json(),
-    ]);
+  renderSummary(stats);
+  renderNodes(nodes);
+  renderTasks(stats.recentExecutions || []);
+  renderLogs(logs);
+  renderReplicaHealth(stats.replicaGroups || []);
+  renderShardCharts(stats.shardSummaries || []);
+  setLastUpdated(stats.lastUpdatedAt || Date.now());
+}
 
-    renderSummary(statsData);
-    renderNodes(nodesData.nodes || []);
-    renderTasks(statsData.recentExecutions || []);
-    renderLogs(logsData.logs || []);
-    renderReplicaLanes(nodesData.nodes || []);
-    lastUpdated.textContent = `updated ${formatRelativeTime(Date.now())}`;
-  } catch (error) {
-    lastUpdated.textContent = `refresh failed: ${error.message}`;
+function updateSnapshot(partial) {
+  state.snapshot = {
+    nodes: partial.nodes || state.snapshot.nodes || [],
+    stats: partial.stats || state.snapshot.stats || {},
+    logs: partial.logs || state.snapshot.logs || [],
+  };
+
+  render(state.snapshot);
+}
+
+async function fetchJson(url) {
+  const response = await fetch(url, {
+    credentials: "same-origin",
+  });
+
+  if (response.status === 401) {
+    throw new Error("Unauthorized");
+  }
+
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function loadSnapshot() {
+  const [nodes, stats, logs] = await Promise.all([
+    fetchJson("/dashboard/nodes"),
+    fetchJson("/dashboard/stats"),
+    fetchJson("/dashboard/logs?limit=24"),
+  ]);
+
+  updateSnapshot({
+    nodes: nodes.nodes || [],
+    stats,
+    logs: logs.logs || [],
+  });
+}
+
+function clearReconnectTimer() {
+  if (state.reconnectTimer) {
+    window.clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
   }
 }
 
-applyTheme(state.theme);
-renderThemeButtons();
-refresh();
-setInterval(refresh, REFRESH_MS);
+function scheduleReconnect() {
+  if (!state.connected || state.reconnectTimer) {
+    return;
+  }
+
+  state.reconnectTimer = window.setTimeout(() => {
+    state.reconnectTimer = null;
+    connectStream();
+  }, STREAM_RECONNECT_DELAY_MS);
+}
+
+function handleStreamEvent(eventName, payload) {
+  if (eventName === "snapshot") {
+    updateSnapshot(payload);
+    return;
+  }
+
+  if (eventName === "node.update") {
+    updateSnapshot({
+      nodes: payload.nodes || state.snapshot.nodes,
+      stats: payload.stats || state.snapshot.stats,
+    });
+    return;
+  }
+
+  if (eventName === "task.execution") {
+    updateSnapshot({
+      stats: {
+        ...state.snapshot.stats,
+        ...payload.stats,
+        recentExecutions: payload.recentExecutions || state.snapshot.stats.recentExecutions || [],
+      },
+    });
+    return;
+  }
+
+  if (eventName === "log.append") {
+    updateSnapshot({
+      logs: payload.logs || state.snapshot.logs,
+    });
+    return;
+  }
+
+  if (eventName === "score.change") {
+    updateSnapshot({
+      stats: payload.stats || state.snapshot.stats,
+    });
+  }
+}
+
+function connectStream() {
+  if (!state.connected) {
+    return;
+  }
+
+  state.eventSource?.close();
+  clearReconnectTimer();
+  setConnectionState("connecting", "Secure session established. Opening live stream.");
+
+  const eventSource = new EventSource("/dashboard/stream");
+  state.eventSource = eventSource;
+
+  eventSource.addEventListener("open", () => {
+    setConnectionState("live", "Streaming node, task, and score updates live.");
+  });
+
+  ["snapshot", "node.update", "score.change", "task.execution", "log.append"].forEach((eventName) => {
+    eventSource.addEventListener(eventName, (event) => {
+      try {
+        handleStreamEvent(eventName, JSON.parse(event.data));
+      } catch (error) {
+        console.error(`Failed to parse ${eventName}`, error);
+      }
+    });
+  });
+
+  eventSource.onerror = () => {
+    setConnectionState("degraded", "Stream interrupted. Reconnecting.");
+    eventSource.close();
+    if (state.eventSource === eventSource) {
+      state.eventSource = null;
+    }
+    scheduleReconnect();
+  };
+}
+
+async function establishSession(apiKey) {
+  const trimmedApiKey = String(apiKey || "").trim();
+
+  if (!trimmedApiKey) {
+    throw new Error("API key is required.");
+  }
+
+  setConnectionState("connecting", "Authorizing dashboard session.");
+  connectButton.disabled = true;
+
+  try {
+    const response = await fetch("/dashboard/session", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        authorization: `Bearer ${trimmedApiKey}`,
+      },
+    });
+
+    if (response.status === 401) {
+      throw new Error("Unauthorized");
+    }
+
+    if (!response.ok) {
+      throw new Error(`Session request failed: ${response.status}`);
+    }
+
+    sessionStorage.setItem(API_KEY_STORAGE_KEY, trimmedApiKey);
+    state.apiKey = trimmedApiKey;
+    state.connected = true;
+    updateVisibility();
+    await loadSnapshot();
+    connectStream();
+  } finally {
+    connectButton.disabled = false;
+  }
+}
+
+async function bootstrap() {
+  applyTheme(state.theme);
+  renderThemeButtons();
+
+  if (state.apiKey) {
+    apiKeyInput.value = state.apiKey;
+  }
+
+  try {
+    state.connected = true;
+    updateVisibility();
+    await loadSnapshot();
+    connectStream();
+    return;
+  } catch (error) {
+    state.connected = false;
+    updateVisibility();
+
+    if (error.message !== "Unauthorized") {
+      authStatus.textContent = `Initial dashboard check failed: ${error.message}`;
+      return;
+    }
+  }
+
+  if (!state.apiKey) {
+    setConnectionState("locked", "Waiting for a valid dashboard session.");
+    return;
+  }
+
+  try {
+    await establishSession(state.apiKey);
+  } catch (error) {
+    state.connected = false;
+    updateVisibility();
+    setConnectionState("locked", error.message === "Unauthorized"
+      ? "Stored API key was rejected. Enter a fresh key."
+      : `Unable to open session: ${error.message}`);
+  }
+}
+
+authForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+
+  try {
+    await establishSession(apiKeyInput.value);
+  } catch (error) {
+    state.connected = false;
+    updateVisibility();
+    setConnectionState("locked", error.message === "Unauthorized"
+      ? "API key rejected. Check the coordinator API key and try again."
+      : error.message);
+  }
+});
+
+window.addEventListener("beforeunload", () => {
+  state.eventSource?.close();
+  clearReconnectTimer();
+});
+
+bootstrap();

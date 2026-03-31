@@ -11,16 +11,28 @@ async function registerWithCoordinator(options = {}) {
   const capacity = Number(options.capacity || process.env.NODE_CAPACITY || 10);
   const shardId = options.shardId || process.env.NODE_SHARD_ID || "default-shard";
   const replicaGroup = options.replicaGroup || process.env.NODE_REPLICA_GROUP || "default-replica";
+  const apiKey = String(
+    options.apiKey
+      || process.env.COORDINATOR_API_KEY
+      || process.env.API_KEY
+      || "privon-demo-key",
+  ).trim();
 
   if (!nodeUrl) {
     throw new Error("NODE_PUBLIC_URL is required to register a node.");
   }
 
+  const headers = {
+    "content-type": "application/json",
+  };
+
+  if (apiKey) {
+    headers.authorization = `Bearer ${apiKey}`;
+  }
+
   const response = await fetch(`${coordinatorUrl}/register-node`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
+    headers,
     body: JSON.stringify({
       url: nodeUrl,
       capacity,
@@ -50,16 +62,28 @@ async function sendHeartbeat(options = {}) {
   }
 
   const nodeUrl = options.nodeUrl || process.env.NODE_PUBLIC_URL;
+  const apiKey = String(
+    options.apiKey
+      || process.env.COORDINATOR_API_KEY
+      || process.env.API_KEY
+      || "privon-demo-key",
+  ).trim();
 
   if (!nodeUrl) {
     throw new Error("NODE_PUBLIC_URL is required to send a heartbeat.");
   }
 
+  const headers = {
+    "content-type": "application/json",
+  };
+
+  if (apiKey) {
+    headers.authorization = `Bearer ${apiKey}`;
+  }
+
   const response = await fetch(`${coordinatorUrl}/heartbeat`, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
+    headers,
     body: JSON.stringify({
       url: nodeUrl,
     }),

@@ -19,9 +19,67 @@ function createBoundedStore(limit) {
   };
 }
 
+function groupNodeSummaries(nodes, keyName) {
+  const groups = new Map();
+
+  for (const node of nodes) {
+    const key = node[keyName] || "unknown";
+    const current = groups.get(key) || {
+      key,
+      totalNodes: 0,
+      activeNodes: 0,
+      probationNodes: 0,
+      inactiveNodes: 0,
+      tasksHandled: 0,
+      averageScore: 0,
+      totalScore: 0,
+      members: [],
+    };
+
+    current.totalNodes += 1;
+    current.tasksHandled += Number(node.totalTasks || 0);
+    current.totalScore += Number(node.score || 0);
+    current.members.push({
+      url: node.url,
+      status: node.status,
+      score: node.score,
+      shardId: node.shardId,
+      replicaGroup: node.replicaGroup,
+    });
+
+    if (node.status === "active") {
+      current.activeNodes += 1;
+    } else if (node.status === "probation") {
+      current.probationNodes += 1;
+    } else {
+      current.inactiveNodes += 1;
+    }
+
+    groups.set(key, current);
+  }
+
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      averageScore: group.totalNodes === 0 ? 0 : Math.round(group.totalScore / group.totalNodes),
+    }))
+    .sort((left, right) => left.key.localeCompare(right.key));
+}
+
 function createDashboardState(options = {}) {
   const logStore = createBoundedStore(options.maxLogs ?? 250);
   const executionStore = createBoundedStore(options.maxExecutions ?? 120);
+  const subscribers = new Set();
+  let nodesSnapshot = [];
+  let logSequence = 0;
+
+  function publish(event, payload) {
+    const frame = { event, payload };
+
+    for (const subscriber of subscribers) {
+      subscriber(frame);
+    }
+  }
 
   function recordLog({
     level = "info",
@@ -30,13 +88,35 @@ function createDashboardState(options = {}) {
     metadata = {},
     timestamp = Date.now(),
   }) {
+    logSequence += 1;
     logStore.push({
-      id: `${timestamp}:${type}:${logStore.list(1).length}`,
+      id: `${timestamp}:${type}:${logSequence}`,
       timestamp,
       level,
       type,
       message,
       metadata,
+    });
+
+    publish("log.append", {
+      logs: logStore.list(40),
+    });
+  }
+
+  function setNodes(nodes, options = {}) {
+    nodesSnapshot = Array.isArray(nodes) ? [...nodes] : [];
+    publish(options.event || "node.update", {
+      nodes: nodesSnapshot,
+      stats: getStats(nodesSnapshot),
+      ...(options.payload || {}),
+    });
+  }
+
+  function recordScoreChange(node, previousScore) {
+    publish("score.change", {
+      node,
+      previousScore,
+      stats: getStats(nodesSnapshot),
     });
   }
 
@@ -68,10 +148,17 @@ function createDashboardState(options = {}) {
         timestamp,
       });
     }
+
+    publish("task.execution", {
+      recentExecutions: executionStore.list(24),
+      stats: getStats(nodesSnapshot),
+    });
   }
 
-  function getStats(nodes) {
+  function getStats(nodes = nodesSnapshot) {
     const allNodes = Array.isArray(nodes) ? nodes : [];
+    const replicaGroups = groupNodeSummaries(allNodes, "replicaGroup");
+    const shardSummaries = groupNodeSummaries(allNodes, "shardId");
     const summary = {
       totalNodes: allNodes.length,
       activeNodes: allNodes.filter((node) => node.status === "active").length,
@@ -89,15 +176,36 @@ function createDashboardState(options = {}) {
 
     return {
       summary,
+      replicaGroups,
+      shardSummaries,
       recentExecutions: executionStore.list(24),
       logCount: logStore.list().length,
       lastUpdatedAt: Date.now(),
     };
   }
 
+  function getSnapshot() {
+    return {
+      nodes: nodesSnapshot,
+      stats: getStats(nodesSnapshot),
+      logs: logStore.list(40),
+    };
+  }
+
+  function subscribe(listener) {
+    subscribers.add(listener);
+    return () => {
+      subscribers.delete(listener);
+    };
+  }
+
   return {
     recordLog,
+    recordScoreChange,
     recordSearchExecution,
+    setNodes,
+    subscribe,
+    getSnapshot,
     getLogs(limit) {
       return logStore.list(limit);
     },

@@ -4,7 +4,7 @@ This repository contains a small MVP for the PCN architecture:
 
 - `client` accepts raw search input and splits a query into fragments before sending work onward
 - `core` contains the shared task splitting utilities, opaque identifier helpers, verified distribution logic, and crypto transport helpers
-- `coordinator` maintains an in-memory node registry and distributes fragments across active nodes with retries
+- `coordinator` maintains a persisted node registry, streams dashboard events over SSE, and distributes fragments across active nodes with retries
 - `node` processes a fragment against its local shard, stays stateless, registers itself dynamically, and sends heartbeats
 - `aggregator` merges partial node results into ranked search matches through its own API
 
@@ -81,11 +81,21 @@ Encrypted payload shape:
 ## Dashboard
 
 - Open `http://localhost:4000/dashboard` to view the network dashboard
-- The dashboard auto-refreshes every 3 seconds
-- It shows node health, replica lanes, recent fragment executions, and coordinator logs
+- Dashboard APIs are protected with `Authorization: Bearer <API_KEY>`
+- The browser upgrades into a secure session with `POST /dashboard/session`, then consumes `GET /dashboard/stream` over Server-Sent Events
+- The dashboard shows live node health, replica-group summaries, shard-level charts, recent fragment executions, and coordinator logs without polling
 - Theme presets are built in for dark and light demo modes
+
+## Auth And Persistence
+
+- Set `API_KEY` on the coordinator and nodes to protect `/dashboard/*` and `/register-node`
+- Nodes can also use `COORDINATOR_API_KEY` if you want a separate registration secret in their environment
+- Node registry state persists to `data/node-registry.json` by default
+- Override the persistence location with `NODE_REGISTRY_FILE`
+- Persisted records include `lastSeen`, `status`, `score`, `totalTasks`, `successfulTasks`, `failedTasks`, `shardId`, and `replicaGroup`
 
 ## Replica Setup
 
 - For reliable shard-aware verification, run at least 2 active replicas per `replicaGroup`
 - The provided `docker-compose.yml` starts two replicas for `shard-a` and two replicas for `shard-b`
+

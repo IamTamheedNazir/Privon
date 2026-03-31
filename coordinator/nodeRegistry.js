@@ -68,6 +68,7 @@ function createNodeRegistry(options = {}) {
   const onRecovery = options.onRecovery || (() => {});
   const onReintegration = options.onReintegration || (() => {});
   const onScoreChange = options.onScoreChange || (() => {});
+  const onChange = options.onChange || (() => {});
 
   function buildNodeRecord(existingNode, nextValues) {
     const score = clampScore(nextValues.score ?? existingNode?.score ?? DEFAULT_SCORE);
@@ -95,8 +96,13 @@ function createNodeRegistry(options = {}) {
     };
   }
 
+  function emitChange() {
+    onChange(sortNodes(nodes.values()));
+  }
+
   function saveNode(node) {
     nodes.set(node.url, node);
+    emitChange();
     return node;
   }
 
@@ -133,6 +139,35 @@ function createNodeRegistry(options = {}) {
       onReintegration(updatedNode);
     }
   }
+
+  function seedInitialNodes(initialNodes) {
+    for (const node of initialNodes || []) {
+      const sanitizedUrl = sanitizeUrl(node?.url);
+      const capacity = Number(node?.capacity || 1);
+
+      if (!sanitizedUrl || !Number.isFinite(capacity) || capacity <= 0) {
+        continue;
+      }
+
+      const seededNode = buildNodeRecord(null, {
+        url: sanitizedUrl,
+        capacity,
+        lastSeen: Number(node.lastSeen || now()),
+        status: node.status,
+        score: Number(node.score ?? DEFAULT_SCORE),
+        totalTasks: Number(node.totalTasks ?? 0),
+        successfulTasks: Number(node.successfulTasks ?? 0),
+        failedTasks: Number(node.failedTasks ?? 0),
+        shardId: node.shardId,
+        replicaGroup: node.replicaGroup,
+        previousStatus: node.status,
+      });
+
+      nodes.set(seededNode.url, seededNode);
+    }
+  }
+
+  seedInitialNodes(options.initialNodes);
 
   function registerNode(node) {
     const sanitizedUrl = sanitizeUrl(node?.url);

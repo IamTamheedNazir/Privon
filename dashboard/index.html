@@ -23,19 +23,51 @@
           <div class="theme-switcher" id="theme-switcher"></div>
           <div class="freshness">
             <span class="freshness-dot"></span>
-            <span id="last-updated">waiting for first sync</span>
+            <span id="last-updated">waiting for secure session</span>
           </div>
+          <div class="connection-pill status-inactive" id="connection-pill">locked</div>
         </div>
       </header>
 
-      <main class="workspace">
+      <section class="auth-shell" id="auth-shell">
+        <div class="auth-copy">
+          <p class="panel-kicker">Secure entry</p>
+          <h2>Authenticate once, then stay on the live SSE stream.</h2>
+          <p class="subcopy compact-copy">
+            Dashboard APIs and node registration are protected with an API key. The browser upgrades into a secure coordinator session so live updates can stream without polling.
+          </p>
+        </div>
+        <form class="auth-form" id="auth-form">
+          <label class="field-label" for="api-key-input">Coordinator API key</label>
+          <div class="auth-row">
+            <input id="api-key-input" name="apiKey" type="password" placeholder="Enter API key" autocomplete="current-password" />
+            <button class="primary-button" type="submit" id="connect-button">Unlock stream</button>
+          </div>
+          <p class="auth-status" id="auth-status">Waiting for a valid dashboard session.</p>
+        </form>
+      </section>
+
+      <main class="workspace" id="workspace" hidden>
         <section class="hero-grid">
           <div class="hero-copy">
             <p class="hero-label">Network pulse</p>
             <div class="metric-strip" id="summary-strip"></div>
           </div>
           <div class="hero-side">
-            <div class="hero-graph" id="replica-lanes"></div>
+            <section class="hero-stack">
+              <div class="hero-stack-head">
+                <p class="panel-kicker">Replica groups</p>
+                <h2>Health by verification lane</h2>
+              </div>
+              <div class="hero-graph" id="replica-lanes"></div>
+            </section>
+            <section class="hero-stack">
+              <div class="hero-stack-head">
+                <p class="panel-kicker">Shard pressure</p>
+                <h2>Tasks and score by shard</h2>
+              </div>
+              <div class="shard-chart" id="shard-chart"></div>
+            </section>
           </div>
         </section>
 
@@ -46,7 +78,7 @@
                 <p class="panel-kicker">Node roster</p>
                 <h2>Active, probation, and sleeping capacity</h2>
               </div>
-              <p class="panel-note">Auto-refresh every 3 seconds</p>
+              <p class="panel-note">Live SSE stream</p>
             </div>
             <div class="node-table" id="node-table"></div>
           </section>
@@ -76,7 +108,7 @@
           <section class="panel panel-stack">
             <div class="panel-header compact">
               <div>
-                <p class="panel-kicker">Replica lanes</p>
+                <p class="panel-kicker">Replica detail</p>
                 <h2>Shard and replica distribution</h2>
               </div>
             </div>

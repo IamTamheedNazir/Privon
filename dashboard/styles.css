@@ -68,6 +68,11 @@ body {
   transition: background 220ms ease, color 220ms ease;
 }
 
+button,
+input {
+  font: inherit;
+}
+
 .shell {
   padding: 28px;
 }
@@ -87,7 +92,10 @@ body {
 .status-pill,
 .theme-button,
 .log-meta,
-.mini-label {
+.mini-label,
+.connection-pill,
+.field-label,
+.primary-button {
   font-family: "IBM Plex Mono", monospace;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -100,7 +108,9 @@ body {
 .log-meta,
 .empty-state,
 .freshness,
-.mini-label {
+.mini-label,
+.auth-status,
+.field-label {
   color: var(--muted);
 }
 
@@ -120,6 +130,10 @@ h1 {
   margin-top: 14px;
   max-width: 52ch;
   line-height: 1.5;
+}
+
+.compact-copy {
+  max-width: 58ch;
 }
 
 .masthead-actions {
@@ -170,11 +184,34 @@ h1 {
   box-shadow: 0 0 0 6px rgba(97, 244, 200, 0.12);
 }
 
+.connection-pill,
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  width: fit-content;
+  color: var(--text);
+  border: 1px solid transparent;
+}
+
+.connection-pill::before,
+.status-pill::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
 .workspace {
   display: grid;
   gap: 22px;
 }
 
+.auth-shell,
 .hero-grid,
 .panel {
   border: 1px solid var(--line);
@@ -183,9 +220,69 @@ h1 {
   box-shadow: var(--shadow);
 }
 
+.auth-shell {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 24px;
+  padding: 28px;
+  border-radius: 32px;
+  margin-bottom: 24px;
+  overflow: hidden;
+}
+
+.auth-form {
+  display: grid;
+  gap: 12px;
+  align-content: center;
+}
+
+.auth-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+}
+
+.auth-form input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--panel-strong);
+  color: var(--text);
+  padding: 15px 16px;
+  outline: none;
+  box-shadow: inset 0 0 0 1px transparent;
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.auth-form input:focus {
+  border-color: rgba(123, 167, 255, 0.5);
+  box-shadow: inset 0 0 0 1px rgba(123, 167, 255, 0.22);
+}
+
+.primary-button {
+  border: 0;
+  border-radius: 18px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #02111e;
+  padding: 0 18px;
+  cursor: pointer;
+  font-weight: 700;
+  transition: transform 180ms ease, box-shadow 180ms ease, opacity 180ms ease;
+}
+
+.primary-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 18px 28px rgba(48, 94, 246, 0.18);
+}
+
+.primary-button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
 .hero-grid {
   display: grid;
-  grid-template-columns: 1.5fr 1fr;
+  grid-template-columns: 1.2fr 1fr;
   gap: 24px;
   min-height: 280px;
   border-radius: 32px;
@@ -219,18 +316,40 @@ h1 {
 }
 
 .hero-side,
+.hero-stack,
 .hero-graph,
+.shard-chart,
 .panel-grid,
 .panel-stack {
   display: grid;
 }
 
-.hero-graph {
+.hero-side {
+  gap: 14px;
+}
+
+.hero-stack {
+  gap: 12px;
+}
+
+.hero-stack-head {
+  display: grid;
+  gap: 4px;
+}
+
+.hero-stack-head h2,
+.panel-header h2 {
+  font-size: 1.45rem;
+}
+
+.hero-graph,
+.shard-chart {
   align-content: start;
   gap: 12px;
 }
 
-.lane-pill {
+.lane-pill,
+.shard-card {
   display: grid;
   gap: 10px;
   padding: 14px 16px;
@@ -246,7 +365,15 @@ h1 {
   align-items: baseline;
 }
 
-.lane-bar {
+.lane-meta-grid {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.lane-bar,
+.chart-track {
   position: relative;
   height: 8px;
   border-radius: 999px;
@@ -254,11 +381,27 @@ h1 {
   overflow: hidden;
 }
 
-.lane-bar span {
+.lane-bar span,
+.chart-track span {
   display: block;
   height: 100%;
   border-radius: inherit;
+}
+
+.lane-bar span,
+.chart-track.load span {
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
+
+.chart-track.score span {
+  background: linear-gradient(90deg, var(--accent-2), #ffffff);
+}
+
+.chart-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
 }
 
 .panel-grid {
@@ -281,10 +424,6 @@ h1 {
   justify-content: space-between;
   gap: 16px;
   align-items: end;
-}
-
-.panel-header h2 {
-  font-size: 1.45rem;
 }
 
 .compact {
@@ -323,38 +462,22 @@ h1 {
   gap: 4px;
 }
 
-.status-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 12px;
-  border-radius: 999px;
-  font-size: 0.7rem;
-  width: fit-content;
-  color: var(--text);
-}
-
-.status-pill::before {
-  content: "";
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: currentColor;
-}
-
 .status-active {
   color: var(--status-active);
   background: rgba(105, 246, 177, 0.1);
+  border-color: rgba(105, 246, 177, 0.16);
 }
 
 .status-probation {
   color: var(--status-probation);
   background: rgba(255, 188, 110, 0.11);
+  border-color: rgba(255, 188, 110, 0.16);
 }
 
 .status-inactive {
   color: var(--status-inactive);
   background: rgba(135, 149, 167, 0.12);
+  border-color: rgba(135, 149, 167, 0.16);
 }
 
 .score-pill {
@@ -443,7 +566,12 @@ h1 {
   text-align: center;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 @media (max-width: 1120px) {
+  .auth-shell,
   .hero-grid,
   .panel-grid {
     grid-template-columns: 1fr;
@@ -460,22 +588,29 @@ h1 {
   }
 
   .masthead {
-    grid-template-columns: 1fr;
     display: grid;
+    gap: 18px;
   }
 
   .masthead-actions {
     justify-items: start;
   }
 
+  .auth-row,
   .metric-row,
   .task-grid,
-  .node-row {
+  .node-row,
+  .chart-row {
     grid-template-columns: 1fr;
   }
 
   .hero-grid,
-  .panel {
+  .panel,
+  .auth-shell {
     border-radius: 24px;
+  }
+
+  .primary-button {
+    padding: 15px 18px;
   }
 }

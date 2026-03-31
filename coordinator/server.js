@@ -4,10 +4,12 @@ const express = require("express");
 const { isEncryptionEnabled } = require("../core/cryptoTransport");
 const { createOpaqueId } = require("../core/createOpaqueId");
 const { dispatchTasks } = require("./dispatchTasks");
+const { createApiKeyAuth } = require("./auth");
 const { createDashboardState } = require("./dashboardState");
 const { getHealthyNodeUrls } = require("./getHealthyNodeUrls");
 const { mergeResults } = require("./mergeResults");
 const { createNodeRegistry } = require("./nodeRegistry");
+const { createNodeRegistryStore } = require("./nodeRegistryStore");
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
@@ -26,8 +28,13 @@ const scoreSuccessIncrement = Number(process.env.SCORE_SUCCESS_INC || 2);
 const scoreFailureDecrement = Number(process.env.SCORE_FAILURE_DEC || 5);
 const probationTrafficRatio = Number(process.env.PROBATION_TRAFFIC_RATIO || 0.1);
 const probationSuccessBoost = Number(process.env.PROBATION_SUCCESS_BOOST || 5);
+const apiKey = process.env.API_KEY || "privon-demo-key";
 const encryptionEnabled = isEncryptionEnabled();
+const apiKeyAuth = createApiKeyAuth({ apiKey });
 const dashboardState = createDashboardState();
+const nodeRegistryStore = createNodeRegistryStore({
+  filePath: process.env.NODE_REGISTRY_FILE,
+});
 
 function emitCoordinatorLog(message, options = {}) {
   const level = options.level || "info";
@@ -46,10 +53,15 @@ function emitCoordinatorLog(message, options = {}) {
 }
 
 const nodeRegistry = createNodeRegistry({
+  initialNodes: nodeRegistryStore.loadNodes(),
   inactivityThresholdMs,
   scoreSuccessIncrement,
   scoreFailureDecrement,
   probationSuccessBoost,
+  onChange(nodes) {
+    nodeRegistryStore.saveNodes(nodes);
+    dashboardState.setNodes(nodes);
+  },
   onInactive(node, reason) {
     emitCoordinatorLog(
       `[coordinator] node became inactive: ${node.url} reason=${reason}`,
@@ -106,9 +118,13 @@ const nodeRegistry = createNodeRegistry({
           metadata: { node, previousScore },
         },
       );
+      dashboardState.recordScoreChange(node, previousScore);
     }
   },
 });
+
+dashboardState.setNodes(nodeRegistry.listNodes(), { event: "snapshot" });
+nodeRegistry.cleanupInactiveNodes();
 
 app.use(express.json({ limit: "16kb" }));
 app.use("/dashboard-app", express.static(path.join(__dirname, "..", "dashboard")));
@@ -117,7 +133,28 @@ app.get(["/dashboard", "/dashboard/"], (_request, response) => {
   response.sendFile(path.resolve(__dirname, "..", "dashboard", "index.html"));
 });
 
+app.use("/dashboard", (request, response, next) => {
+  if (request.path === "/session") {
+    if (!apiKeyAuth.ensureAuthorized(request, response)) {
+      return;
+    }
+
+    next();
+    return;
+  }
+
+  if (!apiKeyAuth.ensureAuthorized(request, response, { allowSession: true })) {
+    return;
+  }
+
+  next();
+});
+
 app.post("/register-node", (request, response) => {
+  if (!apiKeyAuth.ensureAuthorized(request, response)) {
+    return;
+  }
+
   try {
     const { node, duplicate } = nodeRegistry.registerNode({
       url: request.body?.url,
@@ -164,6 +201,14 @@ app.post("/heartbeat", (request, response) => {
   }
 });
 
+app.post("/dashboard/session", (_request, response) => {
+  apiKeyAuth.setSessionCookie(response);
+
+  return response.json({
+    success: true,
+  });
+});
+
 app.get("/nodes", (_request, response) => {
   const activeNodes = nodeRegistry.listActiveNodes();
 
@@ -197,6 +242,35 @@ app.get("/dashboard/logs", (request, response) => {
     logs: dashboardState.getLogs(limit),
     totalLogs: dashboardState.getLogs().length,
     lastUpdatedAt: Date.now(),
+  });
+});
+
+app.get("/dashboard/stream", (request, response) => {
+  response.setHeader("Content-Type", "text/event-stream");
+  response.setHeader("Cache-Control", "no-cache, no-transform");
+  response.setHeader("Connection", "keep-alive");
+  response.setHeader("X-Accel-Buffering", "no");
+  response.flushHeaders?.();
+  response.write("retry: 2000\n\n");
+
+  const sendEvent = (event, payload) => {
+    response.write(`event: ${event}\n`);
+    response.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  sendEvent("snapshot", dashboardState.getSnapshot());
+
+  const unsubscribe = dashboardState.subscribe(({ event, payload }) => {
+    sendEvent(event, payload);
+  });
+  const keepAlive = setInterval(() => {
+    response.write(": keepalive\n\n");
+  }, 15000);
+
+  request.on("close", () => {
+    clearInterval(keepAlive);
+    unsubscribe();
+    response.end();
   });
 });
 
@@ -373,3 +447,4 @@ cleanupTimer.unref();
 app.listen(port, () => {
   emitCoordinatorLog(`[coordinator] listening on port ${port}`);
 });
+

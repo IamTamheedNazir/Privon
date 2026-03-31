@@ -1,11 +1,16 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
 const { mergeSearchResults } = require("../aggregator/resultMerger");
 const { buildSearchPayload } = require("../client/searchClient");
+const { createApiKeyAuth } = require("../coordinator/auth");
 const { dispatchTasks } = require("../coordinator/dispatchTasks");
 const { createDashboardState } = require("../coordinator/dashboardState");
 const { getHealthyNodeUrls } = require("../coordinator/getHealthyNodeUrls");
 const { createNodeRegistry } = require("../coordinator/nodeRegistry");
+const { createNodeRegistryStore } = require("../coordinator/nodeRegistryStore");
 const { decryptPayload, encryptPayload, isEncryptedPayload } = require("../core/cryptoTransport");
 const { createOpaqueId } = require("../core/createOpaqueId");
 const { distributeFragments } = require("../core/distributor");
@@ -219,6 +224,101 @@ async function main() {
     });
   });
 
+  await runTest("api key auth validates bearer tokens and dashboard sessions", () => {
+    const auth = createApiKeyAuth({
+      apiKey: "secret-key",
+      sessionTtlMs: 60000,
+    });
+
+    const unauthorizedResponse = {
+      statusCode: 200,
+      payload: null,
+      headers: {},
+      setHeader(name, value) {
+        this.headers[name] = value;
+      },
+      status(code) {
+        this.statusCode = code;
+        return this;
+      },
+      json(payload) {
+        this.payload = payload;
+        return this;
+      },
+    };
+    const authorizedRequest = {
+      headers: {
+        authorization: "Bearer secret-key",
+      },
+      get(name) {
+        return this.headers[String(name).toLowerCase()] || "";
+      },
+    };
+    const unauthorizedRequest = {
+      headers: {},
+      get(name) {
+        return this.headers[String(name).toLowerCase()] || "";
+      },
+    };
+
+    assert.equal(auth.ensureAuthorized(authorizedRequest, unauthorizedResponse), true);
+    assert.equal(auth.ensureAuthorized(unauthorizedRequest, unauthorizedResponse), false);
+    assert.equal(unauthorizedResponse.statusCode, 401);
+    assert.deepEqual(unauthorizedResponse.payload, { error: "Unauthorized" });
+
+    const sessionResponse = {
+      headers: {},
+      setHeader(name, value) {
+        this.headers[name] = value;
+      },
+    };
+    auth.setSessionCookie(sessionResponse);
+    const sessionCookie = String(sessionResponse.headers["Set-Cookie"]).split(";")[0];
+    const sessionRequest = {
+      headers: {
+        cookie: sessionCookie,
+      },
+      get() {
+        return "";
+      },
+    };
+
+    assert.equal(auth.hasValidSession(sessionRequest), true);
+    assert.equal(auth.ensureAuthorized(sessionRequest, unauthorizedResponse, { allowSession: true }), true);
+  });
+
+  await runTest("node registry store persists node records to disk", () => {
+    const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "privon-store-"));
+    const storePath = path.join(tempDirectory, "node-registry.json");
+    const store = createNodeRegistryStore({
+      filePath: storePath,
+    });
+
+    try {
+      const nodes = [
+        {
+          url: "http://localhost:4001",
+          capacity: 5,
+          lastSeen: 1000,
+          status: "active",
+          score: 120,
+          totalTasks: 8,
+          successfulTasks: 7,
+          failedTasks: 1,
+          shardId: "shard-a",
+          replicaGroup: "replica-a",
+        },
+      ];
+
+      store.saveNodes(nodes);
+
+      assert.deepEqual(store.loadNodes(), nodes);
+      assert.equal(fs.existsSync(storePath), true);
+    } finally {
+      fs.rmSync(tempDirectory, { recursive: true, force: true });
+    }
+  });
+
   await runTest("buildSearchPayload converts a query into coordinator-safe fragments", () => {
     assert.deepEqual(
       buildSearchPayload("Private compute search", {
@@ -250,8 +350,13 @@ async function main() {
     }
   });
 
-  await runTest("dashboard state captures logs and search executions", () => {
+  await runTest("dashboard state captures logs, executions, and shard summaries", () => {
     const dashboardState = createDashboardState({ maxLogs: 10, maxExecutions: 10 });
+    const publishedEvents = [];
+
+    const unsubscribe = dashboardState.subscribe((frame) => {
+      publishedEvents.push(frame.event);
+    });
 
     dashboardState.recordLog({
       type: "node.score",
@@ -274,17 +379,45 @@ async function main() {
       ],
       failures: [],
     });
-
-    const stats = dashboardState.getStats([
-      { status: "active", score: 100, totalTasks: 4 },
-      { status: "probation", score: 25, totalTasks: 1 },
+    dashboardState.setNodes([
+      {
+        url: "http://node-a:4001",
+        status: "active",
+        score: 100,
+        totalTasks: 4,
+        shardId: "shard-a",
+        replicaGroup: "replica-a",
+      },
+      {
+        url: "http://node-a:4002",
+        status: "probation",
+        score: 25,
+        totalTasks: 1,
+        shardId: "shard-a",
+        replicaGroup: "replica-a",
+      },
+      {
+        url: "http://node-b:4003",
+        status: "inactive",
+        score: 90,
+        totalTasks: 0,
+        shardId: "shard-b",
+        replicaGroup: "replica-b",
+      },
     ]);
 
-    assert.equal(stats.summary.totalNodes, 2);
+    const stats = dashboardState.getStats();
+
+    assert.equal(stats.summary.totalNodes, 3);
     assert.equal(stats.summary.activeNodes, 1);
     assert.equal(stats.summary.probationNodes, 1);
+    assert.equal(stats.summary.inactiveNodes, 1);
+    assert.equal(stats.replicaGroups.length, 2);
+    assert.equal(stats.shardSummaries.length, 2);
     assert.equal(stats.recentExecutions.length, 1);
     assert.equal(dashboardState.getLogs(5).length, 1);
+    assert.deepEqual(publishedEvents, ["log.append", "task.execution", "node.update"]);
+    unsubscribe();
   });
 
   await runTest("distributeFragments verifies matching redundant results", async () => {
@@ -812,9 +945,11 @@ async function main() {
   await runTest("registerWithCoordinator sends node registration payload", async () => {
     const originalFetch = global.fetch;
     let requestBody;
+    let requestHeaders;
 
     global.fetch = async (_url, options) => {
       requestBody = JSON.parse(options.body);
+      requestHeaders = options.headers;
 
       return {
         ok: true,
@@ -833,6 +968,7 @@ async function main() {
         coordinatorUrl: "http://localhost:4000",
         nodeUrl: "http://localhost:4001",
         capacity: 10,
+        apiKey: "secret-key",
       });
 
       assert.equal(result.success, true);
@@ -842,6 +978,7 @@ async function main() {
         shardId: "default-shard",
         replicaGroup: "default-replica",
       });
+      assert.equal(requestHeaders.authorization, "Bearer secret-key");
     } finally {
       global.fetch = originalFetch;
     }
@@ -850,9 +987,11 @@ async function main() {
   await runTest("sendHeartbeat sends heartbeat payload", async () => {
     const originalFetch = global.fetch;
     let requestBody;
+    let requestHeaders;
 
     global.fetch = async (_url, options) => {
       requestBody = JSON.parse(options.body);
+      requestHeaders = options.headers;
 
       return {
         ok: true,
@@ -869,12 +1008,14 @@ async function main() {
       const result = await sendHeartbeat({
         coordinatorUrl: "http://localhost:4000",
         nodeUrl: "http://localhost:4001",
+        apiKey: "secret-key",
       });
 
       assert.equal(result.success, true);
       assert.deepEqual(requestBody, {
         url: "http://localhost:4001",
       });
+      assert.equal(requestHeaders.authorization, "Bearer secret-key");
     } finally {
       global.fetch = originalFetch;
     }
@@ -956,3 +1097,4 @@ async function main() {
 }
 
 main();
+

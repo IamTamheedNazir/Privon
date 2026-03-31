@@ -1,0 +1,53 @@
+services:
+  node-a:
+    build: .
+    command: ["node", "node/server.js"]
+    environment:
+      PORT: 4001
+      NODE_ID: node-a
+      NODE_DATASET: shard-a
+    ports:
+      - "4001:4001"
+
+  node-b:
+    build: .
+    command: ["node", "node/server.js"]
+    environment:
+      PORT: 4002
+      NODE_ID: node-b
+      NODE_DATASET: shard-b
+    ports:
+      - "4002:4002"
+
+  aggregator:
+    build: .
+    command: ["node", "aggregator/server.js"]
+    environment:
+      PORT: 4003
+    ports:
+      - "4003:4003"
+
+  coordinator:
+    build: .
+    command: ["node", "coordinator/server.js"]
+    environment:
+      PORT: 4000
+      NODE_URLS: http://node-a:4001,http://node-b:4002
+      AGGREGATOR_URL: http://aggregator:4003
+    depends_on:
+      - node-a
+      - node-b
+      - aggregator
+    ports:
+      - "4000:4000"
+
+  client:
+    build: .
+    command: ["node", "client/server.js"]
+    environment:
+      PORT: 3000
+      COORDINATOR_URL: http://coordinator:4000
+    depends_on:
+      - coordinator
+    ports:
+      - "3000:3000"

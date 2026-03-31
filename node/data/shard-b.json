@@ -1,0 +1,17 @@
+[
+  {
+    "id": "doc-b1",
+    "title": "Stateless node design",
+    "content": "Stateless nodes process each fragment independently and return only partial results."
+  },
+  {
+    "id": "doc-b2",
+    "title": "Aggregator ranking",
+    "content": "An aggregator combines fragment matches into a final score ordered by relevance."
+  },
+  {
+    "id": "doc-b3",
+    "title": "Secure task splitting",
+    "content": "Task splitting reduces how much of the original query any single service can observe."
+  }
+]

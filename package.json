@@ -1,0 +1,21 @@
+{
+  "name": "pcn",
+  "version": "1.0.0",
+  "description": "Private Compute Network MVP",
+  "main": "client/server.js",
+  "scripts": {
+    "start:aggregator": "node aggregator/server.js",
+    "start:coordinator": "node coordinator/server.js",
+    "start:node": "node node/server.js",
+    "start:client": "node client/server.js",
+    "start:client:cli": "node client/searchClient.js",
+    "test": "node test/runTests.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}

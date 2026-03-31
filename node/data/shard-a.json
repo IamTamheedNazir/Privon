@@ -1,0 +1,17 @@
+[
+  {
+    "id": "doc-a1",
+    "title": "Private compute overview",
+    "content": "Private compute systems split sensitive work into smaller tasks across isolated workers."
+  },
+  {
+    "id": "doc-a2",
+    "title": "Search federation basics",
+    "content": "Distributed search can route fragments to many workers and merge ranked partial matches."
+  },
+  {
+    "id": "doc-a3",
+    "title": "Coordinator boundaries",
+    "content": "A coordinator should schedule fragments without storing raw user requests."
+  }
+]

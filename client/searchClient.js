@@ -2,6 +2,7 @@ const { splitSearchTask } = require("../core/taskSplitter");
 
 function buildSearchPayload(query, options = {}) {
   const limit = options.limit ?? 5;
+  const minimumMatchedFragments = options.minimumMatchedFragments ?? 1;
   const fragments = splitSearchTask(query, options);
 
   if (fragments.length === 0) {
@@ -11,6 +12,7 @@ function buildSearchPayload(query, options = {}) {
   return {
     fragments,
     limit,
+    minimumMatchedFragments,
   };
 }
 
@@ -24,6 +26,7 @@ async function search(query, options = {}) {
     headers: {
       "content-type": "application/json",
     },
+    signal: AbortSignal.timeout(options.requestTimeoutMs ?? 1500),
     body: JSON.stringify(payload),
   });
 

@@ -1,12 +1,11 @@
-<<<<<<< HEAD
 ## Private Compute Network MVP
 
 This repository contains a small MVP for the PCN architecture:
 
 - `client` accepts raw search input and splits a query into fragments before sending work onward
-- `core` contains the shared task splitting utilities and opaque identifier helpers
-- `coordinator` distributes fragments across nodes without receiving the raw query string
-- `node` processes a fragment against its local shard and stays stateless
+- `core` contains the shared task splitting utilities, opaque identifier helpers, verified distribution logic, and crypto transport helpers
+- `coordinator` maintains an in-memory node registry and distributes fragments across active nodes with retries
+- `node` processes a fragment against its local shard, stays stateless, registers itself dynamically, and sends heartbeats
 - `aggregator` merges partial node results into ranked search matches through its own API
 
 ## Design Rules Applied
@@ -17,183 +16,76 @@ This repository contains a small MVP for the PCN architecture:
 - Internal task and job identifiers are opaque and do not embed fragment text.
 - Code favors small modules and readable control flow over abstraction-heavy patterns.
 
-## Project Structure
+## Phase 2 Task 1-8
 
-```text
-client/
-core/
-coordinator/
-aggregator/
-node/
-test/
-```
+Dynamic node registration, heartbeat-based lifecycle management, dynamic task distribution, shard/replica-aware verification, encrypted fragment transport, node reputation-based selection, probation-based recovery, and a live dashboard are now in place.
 
-## Run The MVP
+### Verified execution behavior
 
-Install dependencies:
+- Each fragment is executed on 2 distinct active nodes by default
+- Verification now happens inside replica groups so only equivalent data is compared
+- Results from different shard groups can be merged after group-local verification succeeds
+- If one execution fails, another active replica in the same group is tried
+- If verified responses mismatch, the fragment is retried with new nodes in that replica group
+- If verification still fails, the fragment is returned as an error
+- Probation nodes are never used in redundant verification pairs
+- Low-risk shadow executions can be sent to probation nodes after active verification succeeds
+- Duplicate execution on the same node for the same fragment is not allowed
 
-```powershell
-npm install
-```
+### Encryption behavior
 
-### Local processes
+- Coordinator-to-node fragment transport can be encrypted with AES-256-GCM
+- Node responses can be encrypted before returning to the coordinator
+- Coordinator decrypts node responses before verification and merging
+- Plaintext fragment data is not logged
+- Encryption is controlled by `ENABLE_ENCRYPTION=true`
+- Shared secret comes from `ENCRYPTION_KEY`
 
-Start two node instances in separate terminals:
-
-```powershell
-$env:PORT=4001
-$env:NODE_ID="node-a"
-$env:NODE_DATASET="shard-a"
-npm run start:node
-```
-
-```powershell
-$env:PORT=4002
-$env:NODE_ID="node-b"
-$env:NODE_DATASET="shard-b"
-npm run start:node
-```
-
-Start the aggregator:
-
-```powershell
-$env:PORT=4003
-npm run start:aggregator
-```
-
-Start the coordinator:
-
-```powershell
-$env:PORT=4000
-$env:NODE_URLS="http://localhost:4001,http://localhost:4002"
-$env:AGGREGATOR_URL="http://localhost:4003"
-npm run start:coordinator
-```
-
-Start the client API:
-
-```powershell
-$env:PORT=3000
-$env:COORDINATOR_URL="http://localhost:4000"
-npm run start:client
-```
-
-Run a search through the client API:
-
-```powershell
-Invoke-RestMethod -Method Post `
-  -Uri "http://localhost:3000/search" `
-  -ContentType "application/json" `
-  -Body '{"query":"private compute search","limit":5}'
-```
-
-Or run the CLI client:
-
-```powershell
-$env:COORDINATOR_URL="http://localhost:4000"
-npm run start:client:cli -- "private compute search"
-```
-
-### Docker Compose
-
-Start the full stack with one command:
-
-```powershell
-docker compose up --build
-```
-
-Then send a request to the client service:
-
-```powershell
-Invoke-RestMethod -Method Post `
-  -Uri "http://localhost:3000/search" `
-  -ContentType "application/json" `
-  -Body '{"query":"private compute search","limit":5}'
-```
-
-Stop the stack:
-
-```powershell
-docker compose down
-```
-
-## API Overview
-
-### `POST /search` on client
-
-Request:
+Encrypted payload shape:
 
 ```json
 {
-  "query": "private compute search",
-  "limit": 5
-}
-```
-
-Response:
-
-```json
-{
-  "jobId": "job-opaque-id",
-  "fragmentsProcessed": 3,
-  "fragments": ["private", "compute", "search"],
-  "results": [
-    {
-      "documentId": "doc-1",
-      "title": "Private compute overview",
-      "score": 5,
-      "matchedFragments": ["private", "compute"]
-    }
-  ]
+  "iv": "base64",
+  "content": "base64",
+  "tag": "base64"
 }
 ```
 
 ## Notes
 
-- This MVP focuses on distributed search behavior, not cryptographic privacy guarantees.
-- The coordinator intentionally avoids logging or persisting request bodies.
-- The client-side splitting step is where the raw query is handled.
-- The coordinator can use the aggregator API when `AGGREGATOR_URL` is set, or fall back to local merging when it is not.
-- The coordinator now uses opaque job and task identifiers so metadata does not reveal fragment text.
-=======
-# Privon — Private Compute Network (PCN)
+- Unknown heartbeats are ignored safely.
+- Nodes send heartbeats every 10 seconds by default.
+- The coordinator marks nodes inactive after 30 seconds without a heartbeat.
+- `GET /nodes` returns only active nodes and includes score/task statistics for each selectable node.
+- Nodes start with score `100`, gain score on verified success, and lose score on task failures.
+- Nodes with score below `20` move into `probation` instead of leaving the network immediately.
+- Probation nodes receive only a small shadow slice of traffic and never decide accepted results.
+- Probation recovery uses a larger score boost and nodes reintegrate to `active` once their score rises above `40`.
+- Repeated failures can still drive a probation node fully `inactive`.
+- Selection prefers higher-score nodes first, then lower relative load.
+- Fragment distribution now lives in `core/distributor.js`.
+- Redundancy defaults to `2` and verification retry rounds default to `2`.
+- Redundant verification assumes the nodes validating the same fragment are working from equivalent data. If nodes hold different shards, mismatches are expected unless you introduce replica groups or shard-aware verification.
+- Encryption is disabled by default. When enabled, both coordinator and nodes must share the same `ENCRYPTION_KEY`.
 
-Privon is a privacy-first distributed compute network that splits tasks across multiple nodes to prevent full data exposure and ensure secure processing.
+## Reputation Config
 
----
+- `SCORE_SUCCESS_INC` controls how much score a node gains on verified success. Default: `2`
+- `SCORE_FAILURE_DEC` controls how much score a node loses on timeout, mismatch, or decryption failure. Default: `5`
 
-## 🚀 Overview
+## Probation Config
 
-Privon (PCN) is an experimental infrastructure project designed to:
+- `PROBATION_TRAFFIC_RATIO` controls the share of low-risk shadow traffic offered to probation nodes. Default: `0.1`
+- `PROBATION_SUCCESS_BOOST` controls the score gain when a probation node matches a verified result. Default: `5`
 
-- Protect user data during computation
-- Distribute workloads across independent nodes
-- Avoid centralized data processing
-- Enable privacy-preserving compute systems
+## Dashboard
 
-Instead of sending full data to a single server, Privon:
+- Open `http://localhost:4000/dashboard` to view the network dashboard
+- The dashboard auto-refreshes every 3 seconds
+- It shows node health, replica lanes, recent fragment executions, and coordinator logs
+- Theme presets are built in for dark and light demo modes
 
-1. Splits data into fragments  
-2. Distributes fragments across nodes  
-3. Processes them independently  
-4. Merges results into a final output  
+## Replica Setup
 
----
-
-## 🧠 Why Privon?
-
-Traditional systems:
-- Centralized ❌
-- Data exposed ❌
-- Privacy risk ❌
-
-Privon:
-- Distributed ✅
-- Fragmented data ✅
-- Privacy-first design ✅
-
----
-
-## 🏗️ Architecture
-
->>>>>>> 3ab3de59642e2bce1671cb1a01d8a9a8e76b92b1
+- For reliable shard-aware verification, run at least 2 active replicas per `replicaGroup`
+- The provided `docker-compose.yml` starts two replicas for `shard-a` and two replicas for `shard-b`

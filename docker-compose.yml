@@ -1,42 +1,79 @@
 services:
-  node-a:
+  node-a-1:
     build: .
     command: ["node", "node/server.js"]
     environment:
       PORT: 4001
-      NODE_ID: node-a
+      NODE_ID: node-a-1
       NODE_DATASET: shard-a
+      NODE_SHARD_ID: shard-a
+      NODE_REPLICA_GROUP: replica-a
+      COORDINATOR_URL: http://coordinator:4000
+      NODE_PUBLIC_URL: http://node-a-1:4001
     ports:
       - "4001:4001"
 
-  node-b:
+  node-a-2:
     build: .
     command: ["node", "node/server.js"]
     environment:
       PORT: 4002
-      NODE_ID: node-b
-      NODE_DATASET: shard-b
+      NODE_ID: node-a-2
+      NODE_DATASET: shard-a
+      NODE_SHARD_ID: shard-a
+      NODE_REPLICA_GROUP: replica-a
+      COORDINATOR_URL: http://coordinator:4000
+      NODE_PUBLIC_URL: http://node-a-2:4002
     ports:
       - "4002:4002"
+
+  node-b-1:
+    build: .
+    command: ["node", "node/server.js"]
+    environment:
+      PORT: 4003
+      NODE_ID: node-b-1
+      NODE_DATASET: shard-b
+      NODE_SHARD_ID: shard-b
+      NODE_REPLICA_GROUP: replica-b
+      COORDINATOR_URL: http://coordinator:4000
+      NODE_PUBLIC_URL: http://node-b-1:4003
+    ports:
+      - "4003:4003"
+
+  node-b-2:
+    build: .
+    command: ["node", "node/server.js"]
+    environment:
+      PORT: 4004
+      NODE_ID: node-b-2
+      NODE_DATASET: shard-b
+      NODE_SHARD_ID: shard-b
+      NODE_REPLICA_GROUP: replica-b
+      COORDINATOR_URL: http://coordinator:4000
+      NODE_PUBLIC_URL: http://node-b-2:4004
+    ports:
+      - "4004:4004"
 
   aggregator:
     build: .
     command: ["node", "aggregator/server.js"]
     environment:
-      PORT: 4003
+      PORT: 4005
     ports:
-      - "4003:4003"
+      - "4005:4005"
 
   coordinator:
     build: .
     command: ["node", "coordinator/server.js"]
     environment:
       PORT: 4000
-      NODE_URLS: http://node-a:4001,http://node-b:4002
-      AGGREGATOR_URL: http://aggregator:4003
+      AGGREGATOR_URL: http://aggregator:4005
     depends_on:
-      - node-a
-      - node-b
+      - node-a-1
+      - node-a-2
+      - node-b-1
+      - node-b-2
       - aggregator
     ports:
       - "4000:4000"

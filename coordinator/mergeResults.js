@@ -17,6 +17,7 @@ async function mergeResults(partialResponses, options = {}) {
     headers: {
       "content-type": "application/json",
     },
+    signal: AbortSignal.timeout(options.requestTimeoutMs ?? 1500),
     body: JSON.stringify({
       partialResponses,
       limit,

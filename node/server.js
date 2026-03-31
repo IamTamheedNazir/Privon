@@ -1,6 +1,7 @@
 const express = require("express");
 
 const { decryptPayload, encryptPayload, isEncryptionEnabled } = require("../core/cryptoTransport");
+const { createRateLimitMiddleware } = require("../core/rateLimit");
 const { loadDataset } = require("./loadDataset");
 const { registerWithCoordinator, sendHeartbeat } = require("./registerWithCoordinator");
 const { searchShard } = require("./searchShard");
@@ -12,9 +13,22 @@ const datasetName = process.env.NODE_DATASET || "shard-a";
 const shardId = process.env.NODE_SHARD_ID || datasetName;
 const replicaGroup = process.env.NODE_REPLICA_GROUP || process.env.NODE_SHARD_ID || datasetName;
 const heartbeatIntervalMs = Number(process.env.NODE_HEARTBEAT_INTERVAL_MS || 10000);
+const defaultRateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MS || 60000);
+const defaultRateLimitMaxRequests = Number(process.env.RATE_LIMIT_MAX_REQUESTS || 100);
+const computeRateLimitWindowMs = Number(process.env.COMPUTE_RATE_LIMIT_WINDOW_MS || defaultRateLimitWindowMs);
+const computeRateLimitMaxRequests = Number(process.env.COMPUTE_RATE_LIMIT_MAX_REQUESTS || defaultRateLimitMaxRequests);
 const nodeUrl = process.env.NODE_PUBLIC_URL || `http://localhost:${port}`;
 const encryptionEnabled = isEncryptionEnabled();
 const documents = loadDataset(datasetName);
+const computeRateLimiter = createRateLimitMiddleware({
+  keyPrefix: "compute",
+  windowMs: computeRateLimitWindowMs,
+  maxRequests: computeRateLimitMaxRequests,
+  message: "Too many compute requests. Please slow down.",
+  log({ ip, route, maxRequests, windowMs }) {
+    console.warn(`[${nodeId}] rate limit exceeded: route=${route} ip=${ip} max=${maxRequests} windowMs=${windowMs}`);
+  },
+});
 
 app.use(express.json());
 
@@ -54,25 +68,43 @@ function handleCompute(request, response) {
     });
   }
 
-  const matches = searchShard(documents, fragment, { limit });
-  const resultPayload = {
-    nodeId,
-    shardId,
-    replicaGroup,
-    taskId,
-    fragmentIndex,
-    matches,
-  };
+  try {
+    const pipelineResult = searchShard(documents, fragment, {
+      limit,
+      includeDiagnostics: true,
+      logger(message) {
+        console.log(`[${nodeId}] ${message}`);
+      },
+    });
+    const resultPayload = {
+      nodeId,
+      shardId,
+      replicaGroup,
+      taskId,
+      fragmentIndex,
+      matches: pipelineResult.matches,
+      pipelineDiagnostics: (pipelineResult.pipelineDiagnostics || []).map((entry) => ({
+        ...entry,
+        nodes: [nodeUrl],
+      })),
+    };
 
-  return response.json(
-    encryptPayload(resultPayload, {
-      enabled: encryptionEnabled,
-    }),
-  );
+    return response.json(
+      encryptPayload(resultPayload, {
+        enabled: encryptionEnabled,
+      }),
+    );
+  } catch (error) {
+    console.error(`[${nodeId}] compute pipeline failed at ${error.stage || "unknown"}: ${error.message}`);
+    return response.status(400).json({
+      error: error.message,
+      stage: error.stage || "compute",
+    });
+  }
 }
 
-app.post("/compute", handleCompute);
-app.post("/tasks/search", handleCompute);
+app.post("/compute", computeRateLimiter, handleCompute);
+app.post("/tasks/search", computeRateLimiter, handleCompute);
 
 app.listen(port, async () => {
   console.log(`[${nodeId}] listening on port ${port} with dataset ${datasetName}`);

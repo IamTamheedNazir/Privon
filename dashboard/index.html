@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -56,6 +56,7 @@
             </div>
             <nav class="sidebar-nav">
               <button class="rail-button active" type="button" data-view-button="overview">Overview</button>
+              <button class="rail-button" type="button" data-view-button="pipeline">Pipeline</button>
               <button class="rail-button" type="button" id="api-keys-nav-item" data-view-button="api-keys" hidden>API Keys</button>
               <button class="rail-button" type="button" id="audit-logs-nav-item" data-view-button="audit-logs" hidden>Audit Logs</button>
             </nav>
@@ -185,6 +186,56 @@
                 </div>
                 <div class="lane-list" id="lane-list"></div>
               </section>
+            </section>
+          </section>
+
+          
+          <section class="view-panel" data-view-panel="pipeline" hidden>
+            <section class="panel admin-hero">
+              <div class="panel-header">
+                <div>
+                  <p class="panel-kicker">Execution</p>
+                  <h2>Pipeline diagnostics</h2>
+                </div>
+                <p class="panel-note">Powered by live SSE task execution updates</p>
+              </div>
+              <p class="subcopy compact-copy">
+                Follow each distributed task through fetch, filter, rank, and verify with sanitized timing, node participation, and stage outcomes.
+              </p>
+            </section>
+
+            <section class="panel panel-stack pipeline-shell">
+              <div class="panel-header compact">
+                <div>
+                  <p class="panel-kicker">Recent tasks</p>
+                  <h2>Stage-by-stage execution flow</h2>
+                </div>
+                <p class="panel-note">No raw query content is displayed</p>
+              </div>
+              <div class="pipeline-controls">
+                <label class="select-stack" for="pipeline-status-filter">
+                  <span class="field-label">Status</span>
+                  <select id="pipeline-status-filter">
+                    <option value="">All statuses</option>
+                    <option value="verified">Verified</option>
+                    <option value="failed">Failed</option>
+                  </select>
+                </label>
+                <label class="select-stack" for="pipeline-replica-filter">
+                  <span class="field-label">Replica Group</span>
+                  <select id="pipeline-replica-filter">
+                    <option value="">All replica groups</option>
+                  </select>
+                </label>
+                <label class="pipeline-toggle" for="pipeline-failure-only">
+                  <input id="pipeline-failure-only" type="checkbox" />
+                  <span>
+                    <strong>Failure traces only</strong>
+                    <span class="meta">Show failed executions or stages with failed verification.</span>
+                  </span>
+                </label>
+              </div>
+              <div class="pipeline-list" id="pipeline-list"></div>
             </section>
           </section>
 

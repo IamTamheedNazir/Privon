@@ -1,4 +1,4 @@
-﻿## Private Compute Network MVP
+## Private Compute Network MVP
 
 This repository contains a small MVP for the PCN architecture:
 
@@ -102,6 +102,20 @@ Encrypted payload shape:
 - `POST /admin/api-keys/revoke` revokes an existing key
 - `GET /admin/api-keys` lists current keys and statuses for `super_admin` operators
 
+
+## Rate Limiting
+
+- `POST /register-node`, `POST /compute`, and `GET /dashboard/stream` now use per-IP sliding-window rate limiting
+- Default limit is `100` requests per `60` seconds per IP
+- Override the shared defaults with `RATE_LIMIT_MAX_REQUESTS` and `RATE_LIMIT_WINDOW_MS`
+- Override specific routes with:
+  - `REGISTER_NODE_RATE_LIMIT_MAX_REQUESTS`
+  - `REGISTER_NODE_RATE_LIMIT_WINDOW_MS`
+  - `COMPUTE_RATE_LIMIT_MAX_REQUESTS`
+  - `COMPUTE_RATE_LIMIT_WINDOW_MS`
+  - `DASHBOARD_STREAM_RATE_LIMIT_MAX_REQUESTS`
+  - `DASHBOARD_STREAM_RATE_LIMIT_WINDOW_MS`
+- When a limit is exceeded, the service returns `429 Too Many Requests` and logs the violation
 ## Replica Setup
 
 - For reliable shard-aware verification, run at least 2 active replicas per `replicaGroup`

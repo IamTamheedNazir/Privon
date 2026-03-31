@@ -1,4 +1,4 @@
-﻿const assert = require("node:assert/strict");
+const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -13,6 +13,7 @@ const { createNodeRegistry } = require("../coordinator/nodeRegistry");
 const { createCoordinatorStore } = require("../coordinator/sqliteStore");
 const { decryptPayload, encryptPayload, isEncryptedPayload } = require("../core/cryptoTransport");
 const { createOpaqueId } = require("../core/createOpaqueId");
+const { createRateLimitMiddleware } = require("../core/rateLimit");
 const { distributeFragments } = require("../core/distributor");
 const { loadDataset } = require("../node/loadDataset");
 const { registerWithCoordinator, sendHeartbeat } = require("../node/registerWithCoordinator");
@@ -59,11 +60,9 @@ async function main() {
     assert.equal(normalizeQuery("  Private Compute  "), "private compute");
   });
 
-  await runTest("splitSearchTask returns unique searchable fragments", () => {
+  await runTest("splitSearchTask preserves phrase fragments instead of splitting words", () => {
     assert.deepEqual(splitSearchTask("Private compute compute search"), [
-      "private",
-      "compute",
-      "search",
+      "private compute compute search",
     ]);
   });
 
@@ -228,6 +227,107 @@ async function main() {
     ]);
   });
 
+  await runTest("rate limiter blocks requests over the configured per-IP threshold", () => {
+    let currentTime = 1000;
+    const limiter = createRateLimitMiddleware({
+      keyPrefix: "test",
+      windowMs: 60_000,
+      maxRequests: 2,
+      now: () => currentTime,
+    });
+    const createRequest = (ip) => ({
+      ip,
+      url: "/register-node",
+      originalUrl: "/register-node",
+      headers: {},
+      get(name) {
+        return this.headers[String(name).toLowerCase()] || "";
+      },
+    });
+    const createResponse = () => ({
+      statusCode: 200,
+      payload: null,
+      headers: {},
+      setHeader(name, value) {
+        this.headers[name] = value;
+      },
+      status(code) {
+        this.statusCode = code;
+        return this;
+      },
+      json(payload) {
+        this.payload = payload;
+        return this;
+      },
+    });
+
+    const nextCalls = [];
+    limiter(createRequest("10.0.0.1"), createResponse(), () => nextCalls.push("first"));
+    limiter(createRequest("10.0.0.1"), createResponse(), () => nextCalls.push("second"));
+
+    const limitedResponse = createResponse();
+    limiter(createRequest("10.0.0.1"), limitedResponse, () => nextCalls.push("blocked"));
+
+    assert.deepEqual(nextCalls, ["first", "second"]);
+    assert.equal(limitedResponse.statusCode, 429);
+    assert.equal(limitedResponse.payload.error.includes("Too many requests"), true);
+    assert.equal(Number(limitedResponse.headers["Retry-After"]) >= 1, true);
+
+    currentTime += 61_000;
+    limiter(createRequest("10.0.0.1"), createResponse(), () => nextCalls.push("recovered"));
+
+    assert.deepEqual(nextCalls, ["first", "second", "recovered"]);
+  });
+
+  await runTest("rate limiter keeps counters isolated per IP", () => {
+    const limiter = createRateLimitMiddleware({
+      keyPrefix: "test",
+      windowMs: 60_000,
+      maxRequests: 1,
+      now: () => 5000,
+    });
+    const createRequest = (ip) => ({
+      ip,
+      url: "/compute",
+      originalUrl: "/compute",
+      headers: {},
+      get(name) {
+        return this.headers[String(name).toLowerCase()] || "";
+      },
+    });
+    const createResponse = () => ({
+      statusCode: 200,
+      payload: null,
+      headers: {},
+      setHeader(name, value) {
+        this.headers[name] = value;
+      },
+      status(code) {
+        this.statusCode = code;
+        return this;
+      },
+      json(payload) {
+        this.payload = payload;
+        return this;
+      },
+    });
+
+    let firstAllowed = false;
+    let secondAllowed = false;
+    limiter(createRequest("10.0.0.1"), createResponse(), () => {
+      firstAllowed = true;
+    });
+    limiter(createRequest("10.0.0.2"), createResponse(), () => {
+      secondAllowed = true;
+    });
+
+    const limitedResponse = createResponse();
+    limiter(createRequest("10.0.0.1"), limitedResponse, () => {});
+
+    assert.equal(firstAllowed, true);
+    assert.equal(secondAllowed, true);
+    assert.equal(limitedResponse.statusCode, 429);
+  });
   await runTest("createOpaqueId creates opaque prefixed identifiers", () => {
     const id = createOpaqueId("task");
     assert.equal(id.startsWith("task-"), true);
@@ -378,7 +478,7 @@ async function main() {
         minimumMatchedFragments: 2,
       }),
       {
-        fragments: ["private", "compute", "search"],
+        fragments: ["private compute search"],
         limit: 7,
         minimumMatchedFragments: 2,
       },
@@ -473,7 +573,39 @@ async function main() {
   });
 
 
-  await runTest("dashboard state maps sanitized audit logs", () => {
+
+  await runTest("dashboard state exposes sanitized pipeline diagnostics for recent executions", () => {
+    const dashboardState = createDashboardState({ maxExecutions: 10 });
+
+    dashboardState.recordSearchExecution({
+      jobId: "job-pipeline",
+      fragments: ["private compute systems"],
+      fragmentResults: [
+        {
+          success: true,
+          fragmentIndex: 0,
+          replicaGroup: "replica-a",
+          shardIds: ["shard-a"],
+          nodeUrls: ["http://node-a:4001", "http://node-b:4002"],
+          probation: { attempted: false },
+          pipeline: [
+            { stage: "fetch", durationMs: 3, success: true, nodes: ["http://node-a:4001", "http://node-b:4002"] },
+            { stage: "filter", durationMs: 2, success: true, nodes: ["http://node-a:4001", "http://node-b:4002"] },
+            { stage: "rank", durationMs: 1, success: true, nodes: ["http://node-a:4001", "http://node-b:4002"] },
+            { stage: "verify", durationMs: 4, success: true, nodes: ["http://node-a:4001", "http://node-b:4002"], summary: "Redundant responses matched" },
+          ],
+        },
+      ],
+      failures: [],
+    });
+
+    const stats = dashboardState.getStats();
+
+    assert.equal(stats.recentPipelines.length, 1);
+    assert.equal(stats.recentPipelines[0].pipeline.length, 4);
+    assert.equal(stats.recentPipelines[0].pipeline[3].stage, "verify");
+    assert.equal(stats.recentPipelines[0].pipeline[3].summary, "Redundant responses matched");
+  });  await runTest("dashboard state maps sanitized audit logs", () => {
     const dashboardState = createDashboardState({ maxLogs: 10 });
 
     dashboardState.recordLog({
@@ -1111,6 +1243,72 @@ async function main() {
     }
   });
 
+  await runTest("pipeline execution keeps fetch filter rank verify flow consistent", async () => {
+    const dataset = loadDataset("shard-a");
+    const stageLogs = [];
+    const payload = buildSearchPayload("Private compute systems", {
+      minimumMatchedFragments: 1,
+    });
+    const originalFetch = global.fetch;
+
+    global.fetch = async (url, options) => {
+      const requestPayload = JSON.parse(options.body);
+      const fragment = decryptPayload(requestPayload, encryptionOptions).fragment;
+      const matches = searchShard(dataset, fragment, {
+        logger(message) {
+          stageLogs.push(message);
+        },
+      });
+
+      return {
+        ok: true,
+        async json() {
+          return encryptPayload(
+            {
+              nodeId: String(url),
+              taskId: "task-1",
+              fragmentIndex: 0,
+              matches,
+            },
+            encryptionOptions,
+          );
+        },
+      };
+    };
+
+    try {
+      const distributed = await distributeFragments(
+        payload.fragments,
+        [
+          { url: "http://node-a:4001", capacity: 1, status: "active", shardId: "shard-a", replicaGroup: "replica-a" },
+          { url: "http://node-b:4002", capacity: 1, status: "active", shardId: "shard-a", replicaGroup: "replica-a" },
+        ],
+        {
+          ...encryptionOptions,
+          redundancyFactor: 2,
+          verificationRetryRounds: 0,
+          requestTimeoutMs: 1000,
+          log(message) {
+            stageLogs.push(message);
+          },
+        },
+      );
+      const merged = mergeSearchResults(distributed.partialResponses, {
+        minimumMatchedFragments: 1,
+      });
+
+      assert.equal(payload.fragments.length, 1);
+      assert.equal(distributed.failures.length, 0);
+      assert.equal(merged.length > 0, true);
+      assert.equal(merged[0].documentId, "doc-a1");
+      assert.equal(stageLogs.some((message) => message.includes("stage=fetch")), true);
+      assert.equal(stageLogs.some((message) => message.includes("stage=filter")), true);
+      assert.equal(stageLogs.some((message) => message.includes("stage=rank")), true);
+      assert.equal(stageLogs.some((message) => message.includes("stage=verify")), true);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
   await runTest("mergeSearchResults combines matches from multiple nodes", () => {
     const merged = mergeSearchResults([
       {
@@ -1173,12 +1371,21 @@ async function main() {
     assert.equal(dataset.length > 0, true);
   });
 
-  await runTest("searchShard ranks matching documents", () => {
+  await runTest("searchShard ranks phrase fragments through fetch filter and rank stages", () => {
     const dataset = loadDataset("shard-a");
-    const matches = searchShard(dataset, "compute");
+    const stageLogs = [];
+    const matches = searchShard(dataset, "private compute", {
+      logger(message) {
+        stageLogs.push(message);
+      },
+    });
 
     assert.equal(matches.length > 0, true);
     assert.equal(matches[0].documentId, "doc-a1");
+    assert.equal(matches[0].matchedFragments[0], "private compute");
+    assert.equal(stageLogs.some((message) => message.includes("stage=fetch")), true);
+    assert.equal(stageLogs.some((message) => message.includes("stage=filter")), true);
+    assert.equal(stageLogs.some((message) => message.includes("stage=rank")), true);
   });
 
   if (!process.exitCode) {

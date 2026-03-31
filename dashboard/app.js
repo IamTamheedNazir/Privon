@@ -4,6 +4,7 @@ const THEMES = [
   { id: "paper", label: "Paper" },
 ];
 const EVENT_TYPES = ["node.update", "score.change", "task.execution", "log.append"];
+const PIPELINE_STATUS_OPTIONS = ["", "verified", "failed"];
 const HUMAN_API_KEY_ROLES = ["viewer", "operator", "super_admin"];
 const AUDIT_TIME_RANGES = {
   "1h": 1000 * 60 * 60,
@@ -12,6 +13,7 @@ const AUDIT_TIME_RANGES = {
 };
 const VIEW_IDS = {
   OVERVIEW: "overview",
+  PIPELINE: "pipeline",
   API_KEYS: "api-keys",
   AUDIT_LOGS: "audit-logs",
 };
@@ -61,6 +63,11 @@ const state = {
     message: "",
     tone: "info",
   },
+  pipeline: {
+    status: "",
+    replicaGroup: "",
+    failureOnly: false,
+  },
   snapshot: {
     nodes: [],
     stats: {
@@ -77,6 +84,7 @@ const themeSwitcher = document.getElementById("theme-switcher");
 const summaryStrip = document.getElementById("summary-strip");
 const nodeTable = document.getElementById("node-table");
 const taskStream = document.getElementById("task-stream");
+const pipelineList = document.getElementById("pipeline-list");
 const logConsole = document.getElementById("log-console");
 const laneList = document.getElementById("lane-list");
 const replicaLanes = document.getElementById("replica-lanes");
@@ -114,6 +122,9 @@ const auditEventFilter = document.getElementById("audit-event-filter");
 const auditTimeFilter = document.getElementById("audit-time-filter");
 const refreshAuditLogsButton = document.getElementById("refresh-audit-logs-button");
 const auditLogTable = document.getElementById("audit-log-table");
+const pipelineStatusFilter = document.getElementById("pipeline-status-filter");
+const pipelineReplicaFilter = document.getElementById("pipeline-replica-filter");
+const pipelineFailureOnly = document.getElementById("pipeline-failure-only");
 
 function formatRelativeTime(timestamp) {
   if (!timestamp) {
@@ -374,7 +385,7 @@ function renderNodes(nodes) {
       <article class="node-row">
         <div class="meta-stack">
           <strong class="node-url">${node.url}</strong>
-          <span class="meta">${node.shardId} · ${node.replicaGroup}</span>
+          <span class="meta">${node.shardId} &middot; ${node.replicaGroup}</span>
         </div>
         <div class="meta-stack">
           <span class="status-pill ${statusClass(node.status)}">${node.status}</span>
@@ -410,7 +421,7 @@ function renderTasks(executions) {
       <div class="meta-stack">
         <span class="status-pill ${task.status === "verified" ? "status-active" : "status-probation"}">${task.status}</span>
         <strong>Fragment ${task.fragmentIndex}: ${task.fragment || "n/a"}</strong>
-        <span class="meta">job ${task.jobId} · ${task.replicaGroup}</span>
+        <span class="meta">job ${task.jobId} &middot; ${task.replicaGroup}</span>
       </div>
       <div class="task-grid">
         <div>
@@ -426,6 +437,99 @@ function renderTasks(executions) {
   `).join("");
 }
 
+
+function pipelineStageClass(stage) {
+  return stage.success === false ? "status-inactive" : "status-active";
+}
+
+function pipelineHasFailure(execution) {
+  return execution.status !== "verified" || (execution.pipeline || []).some((stage) => stage.success === false);
+}
+
+function getFilteredPipelineExecutions(executions) {
+  return (Array.isArray(executions) ? executions : []).filter((execution) => {
+    if (state.pipeline.status && execution.status !== state.pipeline.status) {
+      return false;
+    }
+
+    if (state.pipeline.replicaGroup && execution.replicaGroup !== state.pipeline.replicaGroup) {
+      return false;
+    }
+
+    if (state.pipeline.failureOnly && !pipelineHasFailure(execution)) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
+function renderPipelineFilters(executions) {
+  const pipelineExecutions = Array.isArray(executions) ? executions : [];
+  const replicaOptions = [
+    "",
+    ...new Set([
+      ...(state.filterOptions.replicaGroups || []),
+      ...pipelineExecutions.map((execution) => execution.replicaGroup).filter(Boolean),
+    ]),
+  ];
+
+  pipelineStatusFilter.innerHTML = PIPELINE_STATUS_OPTIONS.map((value) => {
+    const label = value ? value.charAt(0).toUpperCase() + value.slice(1) : "All statuses";
+    return `<option value="${value}">${label}</option>`;
+  }).join("");
+  pipelineStatusFilter.value = state.pipeline.status;
+
+  pipelineReplicaFilter.innerHTML = replicaOptions.map((value) => `
+    <option value="${value}">${value || "All replica groups"}</option>
+  `).join("");
+  pipelineReplicaFilter.value = state.pipeline.replicaGroup;
+  pipelineFailureOnly.checked = Boolean(state.pipeline.failureOnly);
+}
+
+function renderPipelineExecutions(executions) {
+  const pipelineExecutions = getFilteredPipelineExecutions(executions);
+
+  if (!pipelineExecutions.length) {
+    pipelineList.innerHTML = createEmptyState(
+      executions && executions.length
+        ? "No pipeline traces match the current filter set."
+        : "Pipeline diagnostics will appear after distributed tasks execute.",
+    );
+    return;
+  }
+
+  pipelineList.innerHTML = pipelineExecutions.map((execution) => `
+    <article class="pipeline-card">
+      <div class="pipeline-card-head">
+        <div class="meta-stack">
+          <span class="status-pill ${execution.status === "verified" ? "status-active" : "status-inactive"}">${execution.status}</span>
+          <strong>Job ${execution.jobId} &middot; fragment ${execution.fragmentIndex}</strong>
+          <span class="meta">${execution.replicaGroup} &middot; ${formatRelativeTime(execution.timestamp)}</span>
+        </div>
+        <div class="meta-stack">
+          <span class="mini-label">Nodes involved</span>
+          <div class="inline-list">${(execution.nodes || []).map((node) => `<span class="inline-tag">${node}</span>`).join("") || '<span class="meta">none</span>'}</div>
+        </div>
+      </div>
+      <div class="pipeline-flow">
+        ${(execution.pipeline || []).map((stage, index) => `
+          <div class="pipeline-stage ${stage.success === false ? "stage-failed" : "stage-ok"}">
+            <div class="pipeline-stage-head">
+              <span class="status-pill ${pipelineStageClass(stage)}">${stage.success === false ? "failed" : "ok"}</span>
+              <strong>${stage.stage}</strong>
+              <span class="meta">${stage.durationMs} ms</span>
+            </div>
+            <p class="meta">${stage.summary || "Stage completed with sanitized telemetry."}</p>
+            <div class="inline-list">${(stage.nodes || []).map((node) => `<span class="inline-tag">${node}</span>`).join("") || '<span class="meta">node scope hidden</span>'}</div>
+            ${index < (execution.pipeline || []).length - 1 ? '<div class="pipeline-arrow">&rarr;</div>' : ""}
+          </div>
+        `).join("")}
+      </div>
+    </article>
+  `).join("");
+}
+
 function renderLogs(logs) {
   if (!logs.length) {
     logConsole.innerHTML = createEmptyState("No coordinator logs match the current filters.");
@@ -436,7 +540,7 @@ function renderLogs(logs) {
     <article class="log-item">
       <span class="log-level level-${entry.level}"></span>
       <div class="meta-stack">
-        <span class="log-meta">${entry.type} · ${formatRelativeTime(entry.timestamp)}</span>
+        <span class="log-meta">${entry.type} &middot; ${formatRelativeTime(entry.timestamp)}</span>
         <strong>${entry.message}</strong>
       </div>
     </article>
@@ -495,7 +599,7 @@ function renderReplicaHealth(replicaGroups) {
     <button class="lane-item interactive-card" type="button" data-replica-group="${group.key}">
       <div class="lane-head">
         <strong>${group.key}</strong>
-        <span class="meta">${group.probationNodes} probation · ${group.inactiveNodes} inactive</span>
+        <span class="meta">${group.probationNodes} probation &middot; ${group.inactiveNodes} inactive</span>
       </div>
       <div class="inline-list">${group.members.map((member) => `<span class="inline-tag ${statusClass(member.status)}">${member.shardId}</span>`).join("")}</div>
     </button>
@@ -548,7 +652,7 @@ function renderFocusCard(stats) {
 
   focusCopy.innerHTML = `
     <p><strong>Focused scope</strong></p>
-    <p>${hasShard ? `Shard ${state.filters.shardId}` : "All shards"} · ${hasReplica ? `Replica ${state.filters.replicaGroup}` : "All replicas"}</p>
+    <p>${hasShard ? `Shard ${state.filters.shardId}` : "All shards"} &middot; ${hasReplica ? `Replica ${state.filters.replicaGroup}` : "All replicas"}</p>
     <p class="meta">${stats.summary.totalNodes || 0} nodes, ${stats.summary.totalTasksHandled || 0} tasks, ${stats.summary.activeNodes || 0} active lanes in this view.</p>
   `;
 }
@@ -718,7 +822,7 @@ function renderAuditLogs() {
           <strong>${entry.summary || "No summary available."}</strong>
           <span class="meta">${Object.entries(entry.details || {})
             .map(([key, value]) => `${key}: ${value}`)
-            .join(" · ") || "No additional details."}</span>
+            .join(" &middot; ") || "No additional details."}</span>
         </div>
       </article>
     `).join("")}
@@ -735,6 +839,8 @@ function render(snapshot) {
   renderSummary(stats);
   renderNodes(nodes);
   renderTasks(stats.recentExecutions || []);
+  renderPipelineFilters(stats.recentPipelines || stats.recentExecutions || []);
+  renderPipelineExecutions(stats.recentPipelines || stats.recentExecutions || []);
   renderLogs(logs);
   renderReplicaHealth(stats.replicaGroups || []);
   renderShardCharts(stats.shardSummaries || []);
@@ -993,11 +1099,14 @@ function handleStreamEvent(eventName, payload) {
   }
 
   if (eventName === "task.execution") {
+    const recentExecutions = payload.recentExecutions || state.snapshot.stats.recentExecutions || [];
     updateSnapshot({
       stats: {
         ...state.snapshot.stats,
         ...payload.stats,
-        recentExecutions: payload.recentExecutions || state.snapshot.stats.recentExecutions || [],
+        recentExecutions,
+        recentPipelines: payload.stats?.recentPipelines
+          || recentExecutions.filter((execution) => Array.isArray(execution.pipeline) && execution.pipeline.length > 0),
       },
     });
     return;
@@ -1162,9 +1271,14 @@ async function logout(callApi = true) {
     message: "",
     tone: "info",
   };
+  state.pipeline = {
+    status: "",
+    replicaGroup: "",
+    failureOnly: false,
+  };
   state.snapshot = {
     nodes: [],
-    stats: { summary: {}, replicaGroups: [], shardSummaries: [], recentExecutions: [] },
+    stats: { summary: {}, replicaGroups: [], shardSummaries: [], recentExecutions: [], recentPipelines: [] },
     logs: [],
   };
   sessionStorage.removeItem(API_KEY_STORAGE_KEY);
@@ -1177,6 +1291,8 @@ async function logout(callApi = true) {
   renderApiKeys();
   renderAuditFilters();
   renderAuditLogs();
+  renderPipelineFilters([]);
+  renderPipelineExecutions([]);
   setConnectionState("locked", "Dashboard session cleared.");
 }
 
@@ -1311,6 +1427,7 @@ async function bootstrap() {
   apiKeyExpiresAtInput.value = toDatetimeLocalValue(Date.now() + (1000 * 60 * 60 * 24 * 30));
   renderAuditFilters();
   renderAuditLogs();
+  renderPipelineFilters([]);
 
   if (state.apiKey) {
     apiKeyInput.value = state.apiKey;
@@ -1390,6 +1507,21 @@ clearFiltersButton.addEventListener("click", async () => {
   state.filters.replicaGroup = "";
   state.filters.events = [...EVENT_TYPES];
   await applyFilters();
+});
+
+pipelineStatusFilter.addEventListener("change", () => {
+  state.pipeline.status = pipelineStatusFilter.value;
+  renderPipelineExecutions(state.snapshot.stats.recentPipelines || state.snapshot.stats.recentExecutions || []);
+});
+
+pipelineReplicaFilter.addEventListener("change", () => {
+  state.pipeline.replicaGroup = pipelineReplicaFilter.value;
+  renderPipelineExecutions(state.snapshot.stats.recentPipelines || state.snapshot.stats.recentExecutions || []);
+});
+
+pipelineFailureOnly.addEventListener("change", () => {
+  state.pipeline.failureOnly = pipelineFailureOnly.checked;
+  renderPipelineExecutions(state.snapshot.stats.recentPipelines || state.snapshot.stats.recentExecutions || []);
 });
 
 renewButton.addEventListener("click", async () => {

@@ -757,6 +757,98 @@ input[type="datetime-local"]:focus {
   text-align: center;
 }
 
+
+.pipeline-shell,
+.pipeline-list {
+  display: grid;
+  gap: 14px;
+}
+
+.pipeline-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.pipeline-toggle {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  align-items: start;
+  min-height: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--panel-soft);
+}
+
+.pipeline-toggle input {
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+}
+
+.pipeline-toggle strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.pipeline-card {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border-radius: 22px;
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--panel-strong), transparent);
+}
+
+.pipeline-card-head {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: 14px;
+}
+
+.pipeline-flow {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.pipeline-stage {
+  position: relative;
+  display: grid;
+  gap: 10px;
+  min-height: 150px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.pipeline-stage-head {
+  display: grid;
+  gap: 6px;
+}
+
+.stage-ok {
+  border-color: rgba(105, 246, 177, 0.2);
+}
+
+.stage-failed {
+  border-color: rgba(255, 108, 139, 0.24);
+  background: linear-gradient(180deg, rgba(255, 108, 139, 0.12), transparent);
+}
+
+.pipeline-arrow {
+  position: absolute;
+  right: -13px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--accent-2);
+  font-size: 1.2rem;
+  font-family: "IBM Plex Mono", monospace;
+}
 .audit-shell {
   display: grid;
   gap: 18px;
@@ -823,6 +915,7 @@ input[type="datetime-local"]:focus {
 @media (max-width: 1280px) {
   .workspace,
   .control-grid,
+  .pipeline-controls,
   .hero-grid,
   .panel-grid,
   .admin-grid {

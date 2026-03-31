@@ -1,4 +1,4 @@
-﻿const AUDIT_EVENT_TYPE_MAP = {
+const AUDIT_EVENT_TYPE_MAP = {
   "auth.api_key.create": "key.create",
   "auth.api_key.revoke": "key.revoke",
   "auth.session.create": "session.login",
@@ -155,6 +155,15 @@ function groupNodeSummaries(nodes, keyName) {
     .sort((left, right) => left.key.localeCompare(right.key));
 }
 
+function sanitizePipelineStages(stages) {
+  return (Array.isArray(stages) ? stages : []).map((stage) => ({
+    stage: String(stage.stage || "unknown"),
+    durationMs: Math.max(0, Number(stage.durationMs || 0)),
+    success: stage.success !== false,
+    nodes: Array.isArray(stage.nodes) ? [...new Set(stage.nodes.filter(Boolean))] : [],
+    summary: String(stage.summary || "").trim(),
+  }));
+}
 function normalizeAuditFilters(filters = {}) {
   const since = Number(filters.since || 0);
 
@@ -310,6 +319,7 @@ function createDashboardState(options = {}) {
         nodes: fragmentResult.nodeUrls || [],
         probation: fragmentResult.probation || { attempted: false },
         failureCount: Array.isArray(fragmentResult.failures) ? fragmentResult.failures.length : 0,
+        pipeline: sanitizePipelineStages(fragmentResult.pipeline),
       });
     }
 
@@ -402,6 +412,7 @@ function createDashboardState(options = {}) {
       replicaGroups,
       shardSummaries,
       recentExecutions: filteredExecutions,
+      recentPipelines: filteredExecutions.filter((execution) => Array.isArray(execution.pipeline) && execution.pipeline.length > 0),
       logCount: filteredLogs.length,
       lastUpdatedAt: Date.now(),
       appliedFilters: {

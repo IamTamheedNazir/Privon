@@ -1,9 +1,10 @@
-﻿const crypto = require("crypto");
+const crypto = require("crypto");
 const path = require("path");
 const express = require("express");
 
 const { isEncryptionEnabled } = require("../core/cryptoTransport");
 const { createOpaqueId } = require("../core/createOpaqueId");
+const { createRateLimitMiddleware } = require("../core/rateLimit");
 const { dispatchTasks } = require("./dispatchTasks");
 const { createApiKeyAuth } = require("./auth");
 const { createDashboardState } = require("./dashboardState");
@@ -36,6 +37,12 @@ const scoreSuccessIncrement = Number(process.env.SCORE_SUCCESS_INC || 2);
 const scoreFailureDecrement = Number(process.env.SCORE_FAILURE_DEC || 5);
 const probationTrafficRatio = Number(process.env.PROBATION_TRAFFIC_RATIO || 0.1);
 const probationSuccessBoost = Number(process.env.PROBATION_SUCCESS_BOOST || 5);
+const defaultRateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MS || 60000);
+const defaultRateLimitMaxRequests = Number(process.env.RATE_LIMIT_MAX_REQUESTS || 100);
+const registerNodeRateLimitWindowMs = Number(process.env.REGISTER_NODE_RATE_LIMIT_WINDOW_MS || defaultRateLimitWindowMs);
+const registerNodeRateLimitMaxRequests = Number(process.env.REGISTER_NODE_RATE_LIMIT_MAX_REQUESTS || defaultRateLimitMaxRequests);
+const dashboardStreamRateLimitWindowMs = Number(process.env.DASHBOARD_STREAM_RATE_LIMIT_WINDOW_MS || defaultRateLimitWindowMs);
+const dashboardStreamRateLimitMaxRequests = Number(process.env.DASHBOARD_STREAM_RATE_LIMIT_MAX_REQUESTS || defaultRateLimitMaxRequests);
 const dashboardSessionTtlMs = Number(process.env.DASHBOARD_SESSION_TTL_MS || 1000 * 60 * 30);
 const bootstrapKeyTtlMs = Number(process.env.BOOTSTRAP_KEY_TTL_MS || 1000 * 60 * 60 * 24 * 365);
 const createdApiKeyTtlMs = Number(process.env.CREATED_API_KEY_TTL_MS || 1000 * 60 * 60 * 24 * 30);
@@ -71,6 +78,50 @@ for (const bootstrapApiKey of bootstrapApiKeys) {
 const apiKeyAuth = createApiKeyAuth({
   keyStore: coordinatorStore,
   sessionTtlMs: dashboardSessionTtlMs,
+});
+
+const registerNodeRateLimiter = createRateLimitMiddleware({
+  keyPrefix: "register-node",
+  windowMs: registerNodeRateLimitWindowMs,
+  maxRequests: registerNodeRateLimitMaxRequests,
+  message: "Too many registration requests. Please slow down.",
+  log({ ip, route, maxRequests, windowMs }) {
+    emitCoordinatorLog(
+      `[coordinator] rate limit exceeded: route=${route} ip=${ip}`,
+      {
+        level: "warn",
+        type: "security.rate_limit",
+        metadata: {
+          ip,
+          route,
+          maxRequests,
+          windowMs,
+        },
+      },
+    );
+  },
+});
+
+const dashboardStreamRateLimiter = createRateLimitMiddleware({
+  keyPrefix: "dashboard-stream",
+  windowMs: dashboardStreamRateLimitWindowMs,
+  maxRequests: dashboardStreamRateLimitMaxRequests,
+  message: "Too many dashboard stream requests. Please slow down.",
+  log({ ip, route, maxRequests, windowMs }) {
+    emitCoordinatorLog(
+      `[coordinator] rate limit exceeded: route=${route} ip=${ip}`,
+      {
+        level: "warn",
+        type: "security.rate_limit",
+        metadata: {
+          ip,
+          route,
+          maxRequests,
+          windowMs,
+        },
+      },
+    );
+  },
 });
 
 function emitCoordinatorLog(message, options = {}) {
@@ -307,7 +358,7 @@ app.use("/admin", (request, response, next) => {
   next();
 });
 
-app.post("/register-node", (request, response) => {
+app.post("/register-node", registerNodeRateLimiter, (request, response) => {
   if (!apiKeyAuth.ensureAuthorized(request, response, { allowedRoles: NODE_ROUTE_ROLES })) {
     return;
   }
@@ -483,7 +534,7 @@ app.get("/dashboard/logs", (request, response) => {
   });
 });
 
-app.get("/dashboard/stream", (request, response) => {
+app.get("/dashboard/stream", dashboardStreamRateLimiter, (request, response) => {
   const filters = parseDashboardFilters(request.query);
 
   response.setHeader("Content-Type", "text/event-stream");

@@ -1,6 +1,55 @@
 const { decryptPayload, encryptPayload, isEncryptionEnabled } = require("./cryptoTransport");
 const { createOpaqueId } = require("./createOpaqueId");
+const { logPipelineStage, validateFragment, validateNodeResponse } = require("./pipelineValidation");
 
+const PIPELINE_STAGE_ORDER = ["fetch", "filter", "rank", "verify"];
+
+function buildStageResult(stage, details = {}) {
+  return {
+    stage,
+    durationMs: Math.max(0, Number(details.durationMs || 0)),
+    success: details.success !== false,
+    nodes: Array.isArray(details.nodes) ? [...new Set(details.nodes.filter(Boolean))] : [],
+    summary: details.summary || "",
+  };
+}
+
+function aggregateResponsePipelineDiagnostics(responses) {
+  const groupedStages = new Map();
+
+  for (const response of responses) {
+    for (const stageEntry of response.response?.pipelineDiagnostics || []) {
+      const current = groupedStages.get(stageEntry.stage) || {
+        stage: stageEntry.stage,
+        durationMs: 0,
+        samples: 0,
+        success: true,
+        nodes: new Set(),
+      };
+
+      current.durationMs += Number(stageEntry.durationMs || 0);
+      current.samples += 1;
+      current.success = current.success && stageEntry.success !== false;
+      for (const nodeUrl of stageEntry.nodes || [response.nodeUrl]) {
+        if (nodeUrl) {
+          current.nodes.add(nodeUrl);
+        }
+      }
+      groupedStages.set(stageEntry.stage, current);
+    }
+  }
+
+  return PIPELINE_STAGE_ORDER
+    .filter((stage) => groupedStages.has(stage))
+    .map((stage) => {
+      const entry = groupedStages.get(stage);
+      return buildStageResult(stage, {
+        durationMs: entry.samples === 0 ? 0 : Math.round(entry.durationMs / entry.samples),
+        success: entry.success,
+        nodes: [...entry.nodes],
+      });
+    });
+}
 function createNodeError(node, message) {
   const error = new Error(message);
   error.nodeUrl = node?.url;
@@ -139,6 +188,7 @@ function responsesMatch(responses) {
 }
 
 async function executeOnNode(node, fragment, fragmentIndex, options = {}) {
+  validateFragment(fragment, "verify");
   const limit = options.limit ?? 5;
   const requestTimeoutMs = options.requestTimeoutMs ?? 3000;
   const assignmentCounts = options.assignmentCounts || new Map();
@@ -166,11 +216,27 @@ async function executeOnNode(node, fragment, fragmentIndex, options = {}) {
     });
 
     if (!response.ok) {
-      throw createNodeError(node, `Node ${node.url} returned ${response.status}`);
+      let errorBody = null;
+
+      try {
+        errorBody = await response.json();
+      } catch (_error) {
+        errorBody = null;
+      }
+
+      const stageSuffix = errorBody?.stage ? ` stage=${errorBody.stage}` : "";
+      const messageSuffix = errorBody?.error ? ` ${errorBody.error}` : "";
+      throw createNodeError(node, `Node ${node.url} returned ${response.status}${stageSuffix}${messageSuffix}`.trim());
     }
 
     const responseBody = await response.json();
     const decryptedResponse = decryptPayload(responseBody, options);
+    validateNodeResponse(decryptedResponse, fragment);
+    logPipelineStage(options.log, "verify", {
+      fragmentIndex,
+      nodeUrl: node.url,
+      response: decryptedResponse,
+    });
 
     return {
       node,
@@ -342,6 +408,7 @@ async function executeReplicaGroup(fragment, fragmentIndex, replicaGroup, active
   const failures = [];
   const totalRounds = verificationRetryRounds + 1;
   const shardIds = [...new Set(activeNodes.map((node) => node.shardId))];
+  const verifyStartedAt = Date.now();
 
   for (let roundIndex = 0; roundIndex < totalRounds; roundIndex += 1) {
     const availableNodes = chooseCandidateNodes(
@@ -364,12 +431,25 @@ async function executeReplicaGroup(fragment, fragmentIndex, replicaGroup, active
         replicaGroup,
         shardIds,
         failures,
+        pipeline: [
+          buildStageResult("verify", {
+            durationMs: Date.now() - verifyStartedAt,
+            success: false,
+            nodes: availableNodes.map((node) => node.url),
+            summary: "Insufficient active nodes for verification",
+          }),
+        ],
       };
     }
 
-    log(
-      `[distributor] fragment ${fragmentIndex} starting verification round ${roundIndex + 1}/${totalRounds} for replica group ${replicaGroup}`,
-    );
+    log(`[distributor] fragment ${fragmentIndex} starting verification round ${roundIndex + 1}/${totalRounds} for replica group ${replicaGroup}`);
+    logPipelineStage(log, "verify", {
+      fragmentIndex,
+      replicaGroup,
+      round: roundIndex + 1,
+      expectedResponses: redundancyFactor,
+      candidateNodes: availableNodes,
+    });
 
     const roundResult = await collectVerifiedResponses(fragment, fragmentIndex, availableNodes, {
       ...options,
@@ -400,6 +480,14 @@ async function executeReplicaGroup(fragment, fragmentIndex, replicaGroup, active
         replicaGroup,
         shardIds,
         failures,
+        pipeline: [
+          buildStageResult("verify", {
+            durationMs: Date.now() - verifyStartedAt,
+            success: false,
+            nodes: availableNodes.map((node) => node.url),
+            summary: "Insufficient active nodes for verification",
+          }),
+        ],
       };
     }
 
@@ -413,6 +501,12 @@ async function executeReplicaGroup(fragment, fragmentIndex, replicaGroup, active
       }
 
       log(`[distributor] fragment ${fragmentIndex} verification succeeded for replica group ${replicaGroup}`);
+      logPipelineStage(log, "verify", {
+        fragmentIndex,
+        replicaGroup,
+        verified: true,
+        nodeUrls: roundResult.responses.map((response) => response.nodeUrl),
+      });
 
       const probationResult = await runProbationCheck(
         fragment,
@@ -433,6 +527,15 @@ async function executeReplicaGroup(fragment, fragmentIndex, replicaGroup, active
         nodeUrls: roundResult.responses.map((response) => response.nodeUrl),
         response: roundResult.responses[0].response,
         probation: probationResult,
+        pipeline: [
+          ...aggregateResponsePipelineDiagnostics(roundResult.responses),
+          buildStageResult("verify", {
+            durationMs: Date.now() - verifyStartedAt,
+            success: true,
+            nodes: roundResult.responses.map((response) => response.nodeUrl),
+            summary: "Redundant responses matched",
+          }),
+        ],
       };
     }
 
@@ -446,6 +549,13 @@ async function executeReplicaGroup(fragment, fragmentIndex, replicaGroup, active
       nodeUrls: roundResult.responses.map((response) => response.nodeUrl),
     });
     log(`[distributor] fragment ${fragmentIndex} mismatch detected in replica group ${replicaGroup}`);
+    logPipelineStage(log, "verify", {
+      fragmentIndex,
+      replicaGroup,
+      verified: false,
+      nodeUrls: roundResult.responses.map((response) => response.nodeUrl),
+      failures: roundResult.failures,
+    });
 
     if (roundIndex < totalRounds - 1) {
       log(`[distributor] fragment ${fragmentIndex} retrying verification with new nodes in replica group ${replicaGroup}`);
@@ -458,6 +568,14 @@ async function executeReplicaGroup(fragment, fragmentIndex, replicaGroup, active
     replicaGroup,
     shardIds,
     failures,
+    pipeline: [
+      buildStageResult("verify", {
+        durationMs: Date.now() - verifyStartedAt,
+        success: false,
+        nodes: [...usedNodeUrls],
+        summary: "Verification rounds exhausted",
+      }),
+    ],
   };
 }
 
@@ -480,10 +598,14 @@ async function distributeFragments(fragments, nodes, options = {}) {
     throw new Error("A non-empty fragments array is required.");
   }
 
+  logPipelineStage(options.log, "verify", {
+    fragments,
+    activeNodes,
+    probationNodes,
+  });
+
   for (const [fragmentIndex, fragment] of fragments.entries()) {
-    if (typeof fragment !== "string" || fragment.trim().length === 0) {
-      throw new Error("Each fragment must be a non-empty string.");
-    }
+    validateFragment(fragment, "verify");
 
     for (const [replicaGroup, activeGroupNodes] of activeGroups.entries()) {
       const probationGroupNodes = probationGroups.get(replicaGroup) || [];

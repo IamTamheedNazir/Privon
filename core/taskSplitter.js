@@ -6,36 +6,31 @@ function normalizeQuery(query) {
     return "";
   }
 
-  return query.trim().toLowerCase();
+  return query
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
 }
 
 function splitSearchTask(query, options = {}) {
-  const minFragmentLength =
-    options.minFragmentLength ?? DEFAULT_MIN_FRAGMENT_LENGTH;
+  const minFragmentLength = options.minFragmentLength ?? DEFAULT_MIN_FRAGMENT_LENGTH;
   const maxFragments = options.maxFragments ?? DEFAULT_MAX_FRAGMENTS;
-
   const normalizedQuery = normalizeQuery(query);
 
   if (!normalizedQuery) {
     return [];
   }
 
-  const uniqueFragments = new Set();
-  const tokens = normalizedQuery.split(/[^a-z0-9]+/i);
+  const phraseFragments = normalizedQuery
+    .split(/\s*(?:[\n,;|]+|\s+-\s+)\s*/)
+    .map((fragment) => fragment.trim())
+    .filter((fragment) => fragment.length >= minFragmentLength);
 
-  for (const token of tokens) {
-    if (token.length < minFragmentLength) {
-      continue;
-    }
-
-    uniqueFragments.add(token);
-
-    if (uniqueFragments.size >= maxFragments) {
-      break;
-    }
+  if (phraseFragments.length === 0) {
+    return [];
   }
 
-  return [...uniqueFragments];
+  return [...new Set(phraseFragments)].slice(0, maxFragments);
 }
 
 module.exports = {

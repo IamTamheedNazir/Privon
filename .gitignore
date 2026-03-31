@@ -1,5 +1,5 @@
-node_modules/
+﻿node_modules/
 logs/
-data/privon.sqlite
-data/privon.sqlite-shm
-data/privon.sqlite-wal
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal

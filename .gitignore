@@ -1,4 +1,5 @@
 node_modules/
 logs/
-data/node-registry.json
-
+data/privon.sqlite
+data/privon.sqlite-shm
+data/privon.sqlite-wal

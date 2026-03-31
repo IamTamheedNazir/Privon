@@ -1,4 +1,4 @@
-const assert = require("node:assert/strict");
+﻿const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -10,7 +10,7 @@ const { dispatchTasks } = require("../coordinator/dispatchTasks");
 const { createDashboardState } = require("../coordinator/dashboardState");
 const { getHealthyNodeUrls } = require("../coordinator/getHealthyNodeUrls");
 const { createNodeRegistry } = require("../coordinator/nodeRegistry");
-const { createNodeRegistryStore } = require("../coordinator/nodeRegistryStore");
+const { createCoordinatorStore } = require("../coordinator/sqliteStore");
 const { decryptPayload, encryptPayload, isEncryptedPayload } = require("../core/cryptoTransport");
 const { createOpaqueId } = require("../core/createOpaqueId");
 const { distributeFragments } = require("../core/distributor");
@@ -23,6 +23,25 @@ const encryptionOptions = {
   enabled: true,
   secret: "pcn-test-secret",
 };
+
+function createTempStore(options = {}) {
+  const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "privon-store-"));
+  const storePath = path.join(tempDirectory, "privon.sqlite");
+  const store = createCoordinatorStore({
+    filePath: storePath,
+    now: options.now,
+  });
+
+  return {
+    tempDirectory,
+    storePath,
+    store,
+    cleanup() {
+      store.close();
+      fs.rmSync(tempDirectory, { recursive: true, force: true });
+    },
+  };
+}
 
 async function runTest(name, callback) {
   try {
@@ -224,75 +243,97 @@ async function main() {
     });
   });
 
-  await runTest("api key auth validates bearer tokens and dashboard sessions", () => {
-    const auth = createApiKeyAuth({
-      apiKey: "secret-key",
-      sessionTtlMs: 60000,
-    });
+  await runTest("api key auth enforces roles, expiration, and session renewal", () => {
+    let currentTime = 50_000;
+    const { store, cleanup } = createTempStore({ now: () => currentTime });
 
-    const unauthorizedResponse = {
-      statusCode: 200,
-      payload: null,
-      headers: {},
-      setHeader(name, value) {
-        this.headers[name] = value;
-      },
-      status(code) {
-        this.statusCode = code;
-        return this;
-      },
-      json(payload) {
-        this.payload = payload;
-        return this;
-      },
-    };
-    const authorizedRequest = {
-      headers: {
-        authorization: "Bearer secret-key",
-      },
-      get(name) {
-        return this.headers[String(name).toLowerCase()] || "";
-      },
-    };
-    const unauthorizedRequest = {
-      headers: {},
-      get(name) {
-        return this.headers[String(name).toLowerCase()] || "";
-      },
-    };
+    try {
+      store.ensureApiKey({
+        key: "admin-key",
+        role: "super_admin",
+        createdAt: currentTime - 1_000,
+        expiresAt: currentTime + 120_000,
+        status: "active",
+      });
+      store.ensureApiKey({
+        key: "node-key",
+        role: "node",
+        createdAt: currentTime - 1_000,
+        expiresAt: currentTime + 120_000,
+        status: "active",
+      });
+      store.ensureApiKey({
+        key: "expired-key",
+        role: "viewer",
+        createdAt: currentTime - 10_000,
+        expiresAt: currentTime - 1,
+        status: "active",
+      });
 
-    assert.equal(auth.ensureAuthorized(authorizedRequest, unauthorizedResponse), true);
-    assert.equal(auth.ensureAuthorized(unauthorizedRequest, unauthorizedResponse), false);
-    assert.equal(unauthorizedResponse.statusCode, 401);
-    assert.deepEqual(unauthorizedResponse.payload, { error: "Unauthorized" });
+      const auth = createApiKeyAuth({
+        keyStore: store,
+        sessionTtlMs: 60_000,
+        now: () => currentTime,
+      });
 
-    const sessionResponse = {
-      headers: {},
-      setHeader(name, value) {
-        this.headers[name] = value;
-      },
-    };
-    auth.setSessionCookie(sessionResponse);
-    const sessionCookie = String(sessionResponse.headers["Set-Cookie"]).split(";")[0];
-    const sessionRequest = {
-      headers: {
-        cookie: sessionCookie,
-      },
-      get() {
-        return "";
-      },
-    };
+      const createResponse = () => ({
+        statusCode: 200,
+        payload: null,
+        headers: {},
+        setHeader(name, value) {
+          this.headers[name] = value;
+        },
+        status(code) {
+          this.statusCode = code;
+          return this;
+        },
+        json(payload) {
+          this.payload = payload;
+          return this;
+        },
+      });
+      const createRequest = (headers = {}) => ({
+        headers,
+        get(name) {
+          return this.headers[String(name).toLowerCase()] || this.headers[name] || "";
+        },
+      });
 
-    assert.equal(auth.hasValidSession(sessionRequest), true);
-    assert.equal(auth.ensureAuthorized(sessionRequest, unauthorizedResponse, { allowSession: true }), true);
+      const adminRequest = createRequest({ authorization: "Bearer admin-key" });
+      const adminResponse = createResponse();
+      assert.equal(auth.ensureAuthorized(adminRequest, adminResponse, { allowedRoles: ["super_admin"] }), true);
+
+      const nodeRequest = createRequest({ authorization: "Bearer node-key" });
+      const nodeResponse = createResponse();
+      assert.equal(auth.ensureAuthorized(nodeRequest, nodeResponse, { allowedRoles: ["super_admin"] }), false);
+      assert.equal(nodeResponse.statusCode, 403);
+
+      const expiredRequest = createRequest({ authorization: "Bearer expired-key" });
+      const expiredResponse = createResponse();
+      assert.equal(auth.ensureAuthorized(expiredRequest, expiredResponse, { allowedRoles: ["viewer"] }), false);
+      assert.equal(expiredResponse.statusCode, 401);
+      assert.equal(store.getApiKey("expired-key").status, "expired");
+
+      const sessionResponse = createResponse();
+      const sessionInfo = auth.createSessionFromApiKey(adminRequest, sessionResponse, ["super_admin"]);
+      const sessionCookie = String(sessionResponse.headers["Set-Cookie"]).split(";")[0];
+      const sessionRequest = createRequest({ cookie: sessionCookie });
+      const sessionAuthResponse = createResponse();
+      assert.equal(auth.ensureAuthorized(sessionRequest, sessionAuthResponse, { allowSession: true, allowedRoles: ["super_admin"] }), true);
+      assert.equal(sessionInfo.role, "super_admin");
+
+      currentTime += 20_000;
+      const renewResponse = createResponse();
+      const renewed = auth.renewSession(sessionRequest, renewResponse, ["super_admin"]);
+      assert.equal(renewed.role, "super_admin");
+      assert.equal(renewed.expiresAt > sessionInfo.expiresAt, true);
+    } finally {
+      cleanup();
+    }
   });
 
-  await runTest("node registry store persists node records to disk", () => {
-    const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "privon-store-"));
-    const storePath = path.join(tempDirectory, "node-registry.json");
-    const store = createNodeRegistryStore({
-      filePath: storePath,
-    });
+  await runTest("sqlite store persists nodes and manageable api keys", () => {
+    const { store, storePath, cleanup } = createTempStore();
 
     try {
       const nodes = [
@@ -311,11 +352,22 @@ async function main() {
       ];
 
       store.saveNodes(nodes);
+      const createdApiKey = store.createApiKey({
+        key: "viewer-key",
+        role: "viewer",
+        createdAt: 1000,
+        expiresAt: 2000,
+        status: "active",
+      });
+      const revokedApiKey = store.revokeApiKey("viewer-key");
 
       assert.deepEqual(store.loadNodes(), nodes);
       assert.equal(fs.existsSync(storePath), true);
+      assert.equal(createdApiKey.role, "viewer");
+      assert.equal(revokedApiKey.status, "revoked");
+      assert.equal(store.listApiKeys().length >= 1, true);
     } finally {
-      fs.rmSync(tempDirectory, { recursive: true, force: true });
+      cleanup();
     }
   });
 
@@ -1097,4 +1149,10 @@ async function main() {
 }
 
 main();
+
+
+
+
+
+
 

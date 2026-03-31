@@ -1,10 +1,10 @@
-## Private Compute Network MVP
+﻿## Private Compute Network MVP
 
 This repository contains a small MVP for the PCN architecture:
 
 - `client` accepts raw search input and splits a query into fragments before sending work onward
 - `core` contains the shared task splitting utilities, opaque identifier helpers, verified distribution logic, and crypto transport helpers
-- `coordinator` maintains a persisted node registry, streams dashboard events over SSE, and distributes fragments across active nodes with retries
+- `coordinator` maintains a SQLite-backed node registry, manages role-based API keys, streams dashboard events over SSE, and distributes fragments across active nodes with retries
 - `node` processes a fragment against its local shard, stays stateless, registers itself dynamically, and sends heartbeats
 - `aggregator` merges partial node results into ranked search matches through its own API
 
@@ -81,21 +81,31 @@ Encrypted payload shape:
 ## Dashboard
 
 - Open `http://localhost:4000/dashboard` to view the network dashboard
-- Dashboard APIs are protected with `Authorization: Bearer <API_KEY>`
-- The browser upgrades into a secure session with `POST /dashboard/session`, then consumes `GET /dashboard/stream` over Server-Sent Events
-- The dashboard shows live node health, replica-group summaries, shard-level charts, recent fragment executions, and coordinator logs without polling
+- Dashboard APIs are protected with `Authorization: Bearer <API_KEY>` and dashboard sessions are limited to `viewer`, `operator`, and `super_admin` roles
+- The browser upgrades into a secure session with `POST /dashboard/session`, can renew it with `POST /dashboard/session/renew`, and closes it with `POST /dashboard/logout`
+- Live updates now arrive through `GET /dashboard/stream` using Server-Sent Events instead of polling
+- Stream filters support `shardId`, `replicaGroup`, and `events`, so you can follow just one verification lane or event class
+- The dashboard shows live node health, replica-group summaries, shard-level charts, recent fragment executions, and coordinator logs, plus drill-down controls for shards and replica groups
 - Theme presets are built in for dark and light demo modes
 
 ## Auth And Persistence
 
-- Set `API_KEY` on the coordinator and nodes to protect `/dashboard/*` and `/register-node`
-- Nodes can also use `COORDINATOR_API_KEY` if you want a separate registration secret in their environment
-- Node registry state persists to `data/node-registry.json` by default
-- Override the persistence location with `NODE_REGISTRY_FILE`
-- Persisted records include `lastSeen`, `status`, `score`, `totalTasks`, `successfulTasks`, `failedTasks`, `shardId`, and `replicaGroup`
+- Coordinator state now persists to SQLite at `data/privon.sqlite` by default
+- Override the database location with `COORDINATOR_DB_FILE`
+- Persisted node records include `url`, `shardId`, `replicaGroup`, `status`, `score`, `totalTasks`, `successfulTasks`, `failedTasks`, `lastSeen`, and `capacity`
+- API keys are also stored in SQLite with `key`, `role`, `createdAt`, `expiresAt`, and `status`
+- Expired keys are rejected automatically and marked expired on read
+- Set `API_KEY` on the coordinator to bootstrap a `super_admin` key at startup
+- Set `NODE_API_KEY` on the coordinator if you want a dedicated node-role registration key
+- Nodes can use `COORDINATOR_API_KEY` or `API_KEY` in their own environment when registering and sending heartbeats
+- `POST /admin/api-keys/create` creates managed keys for `viewer`, `operator`, `node`, or `super_admin`
+- `POST /admin/api-keys/revoke` revokes an existing key
+- `GET /admin/api-keys` lists current keys and statuses for `super_admin` operators
 
 ## Replica Setup
 
 - For reliable shard-aware verification, run at least 2 active replicas per `replicaGroup`
 - The provided `docker-compose.yml` starts two replicas for `shard-a` and two replicas for `shard-b`
+
+
 

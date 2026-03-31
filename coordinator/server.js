@@ -1,3 +1,4 @@
+﻿const crypto = require("crypto");
 const path = require("path");
 const express = require("express");
 
@@ -9,7 +10,14 @@ const { createDashboardState } = require("./dashboardState");
 const { getHealthyNodeUrls } = require("./getHealthyNodeUrls");
 const { mergeResults } = require("./mergeResults");
 const { createNodeRegistry } = require("./nodeRegistry");
-const { createNodeRegistryStore } = require("./nodeRegistryStore");
+const {
+  ADMIN_ROLES,
+  DASHBOARD_ROLES,
+  NODE_ROUTE_ROLES,
+  SUPER_ADMIN_ROLE,
+  VALID_API_KEY_ROLES,
+} = require("./roles");
+const { createCoordinatorStore } = require("./sqliteStore");
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
@@ -28,12 +36,41 @@ const scoreSuccessIncrement = Number(process.env.SCORE_SUCCESS_INC || 2);
 const scoreFailureDecrement = Number(process.env.SCORE_FAILURE_DEC || 5);
 const probationTrafficRatio = Number(process.env.PROBATION_TRAFFIC_RATIO || 0.1);
 const probationSuccessBoost = Number(process.env.PROBATION_SUCCESS_BOOST || 5);
-const apiKey = process.env.API_KEY || "privon-demo-key";
+const dashboardSessionTtlMs = Number(process.env.DASHBOARD_SESSION_TTL_MS || 1000 * 60 * 30);
+const bootstrapKeyTtlMs = Number(process.env.BOOTSTRAP_KEY_TTL_MS || 1000 * 60 * 60 * 24 * 365);
+const createdApiKeyTtlMs = Number(process.env.CREATED_API_KEY_TTL_MS || 1000 * 60 * 60 * 24 * 30);
 const encryptionEnabled = isEncryptionEnabled();
-const apiKeyAuth = createApiKeyAuth({ apiKey });
 const dashboardState = createDashboardState();
-const nodeRegistryStore = createNodeRegistryStore({
-  filePath: process.env.NODE_REGISTRY_FILE,
+const coordinatorStore = createCoordinatorStore({
+  filePath: process.env.COORDINATOR_DB_FILE,
+});
+
+const bootstrapKeyDeadline = Date.now() + bootstrapKeyTtlMs;
+const bootstrapApiKeys = [
+  {
+    key: process.env.API_KEY || "privon-demo-key",
+    role: process.env.API_KEY_ROLE || SUPER_ADMIN_ROLE,
+    expiresAt: Number(process.env.API_KEY_EXPIRES_AT || bootstrapKeyDeadline),
+  },
+  process.env.NODE_API_KEY
+    ? {
+      key: process.env.NODE_API_KEY,
+      role: "node",
+      expiresAt: Number(process.env.NODE_API_KEY_EXPIRES_AT || bootstrapKeyDeadline),
+    }
+    : null,
+].filter(Boolean);
+
+for (const bootstrapApiKey of bootstrapApiKeys) {
+  coordinatorStore.ensureApiKey({
+    ...bootstrapApiKey,
+    status: "active",
+  });
+}
+
+const apiKeyAuth = createApiKeyAuth({
+  keyStore: coordinatorStore,
+  sessionTtlMs: dashboardSessionTtlMs,
 });
 
 function emitCoordinatorLog(message, options = {}) {
@@ -52,14 +89,24 @@ function emitCoordinatorLog(message, options = {}) {
   method(message);
 }
 
+function maskApiKeyValue(value) {
+  const apiKey = String(value || "").trim();
+
+  if (!apiKey) {
+    return "****";
+  }
+
+  return `****${apiKey.slice(-4)}`;
+}
+
 const nodeRegistry = createNodeRegistry({
-  initialNodes: nodeRegistryStore.loadNodes(),
+  initialNodes: coordinatorStore.loadNodes(),
   inactivityThresholdMs,
   scoreSuccessIncrement,
   scoreFailureDecrement,
   probationSuccessBoost,
   onChange(nodes) {
-    nodeRegistryStore.saveNodes(nodes);
+    coordinatorStore.saveNodes(nodes);
     dashboardState.setNodes(nodes);
   },
   onInactive(node, reason) {
@@ -68,7 +115,7 @@ const nodeRegistry = createNodeRegistry({
       {
         level: "warn",
         type: "node.inactive",
-        metadata: { node },
+        metadata: { node, shardId: node.shardId, replicaGroup: node.replicaGroup },
       },
     );
   },
@@ -77,7 +124,7 @@ const nodeRegistry = createNodeRegistry({
       `[coordinator] node reconnected: ${node.url} status=${node.status}`,
       {
         type: "node.reconnect",
-        metadata: { node },
+        metadata: { node, shardId: node.shardId, replicaGroup: node.replicaGroup },
       },
     );
   },
@@ -87,7 +134,7 @@ const nodeRegistry = createNodeRegistry({
       {
         level: "warn",
         type: "node.probation",
-        metadata: { node, reason },
+        metadata: { node, reason, shardId: node.shardId, replicaGroup: node.replicaGroup },
       },
     );
   },
@@ -96,7 +143,7 @@ const nodeRegistry = createNodeRegistry({
       `[coordinator] node recovery progress: ${node.url} ${previousScore} -> ${node.score}`,
       {
         type: "node.recovery",
-        metadata: { node, previousScore },
+        metadata: { node, previousScore, shardId: node.shardId, replicaGroup: node.replicaGroup },
       },
     );
   },
@@ -105,7 +152,7 @@ const nodeRegistry = createNodeRegistry({
       `[coordinator] node reintegrated: ${node.url} (score ${node.score})`,
       {
         type: "node.reintegration",
-        metadata: { node },
+        metadata: { node, shardId: node.shardId, replicaGroup: node.replicaGroup },
       },
     );
   },
@@ -115,13 +162,100 @@ const nodeRegistry = createNodeRegistry({
         `[coordinator] node score changed: ${node.url} ${previousScore} -> ${node.score}`,
         {
           type: "node.score",
-          metadata: { node, previousScore },
+          metadata: { node, previousScore, shardId: node.shardId, replicaGroup: node.replicaGroup },
         },
       );
       dashboardState.recordScoreChange(node, previousScore);
     }
   },
 });
+
+function parseCsvFilter(value) {
+  if (!value) {
+    return [];
+  }
+
+  return String(value)
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function parseDashboardFilters(query = {}) {
+  return {
+    shardId: String(query.shardId || "").trim(),
+    replicaGroup: String(query.replicaGroup || "").trim(),
+    logLevels: parseCsvFilter(query.levels),
+    logTypes: parseCsvFilter(query.types),
+    statuses: parseCsvFilter(query.statuses),
+    events: parseCsvFilter(query.events),
+  };
+}
+
+function buildSessionPayload(request) {
+  return {
+    role: request.auth?.role || "unknown",
+    keyExpiresAt: Number(request.auth?.expiresAt || 0),
+    expiresAt: Number(request.session?.expiresAt || request.auth?.expiresAt || 0),
+  };
+}
+
+function buildDashboardEventPayload(event, filters, payload) {
+  const filtersOnly = {
+    shardId: filters.shardId,
+    replicaGroup: filters.replicaGroup,
+    logLevels: filters.logLevels,
+    logTypes: filters.logTypes,
+    statuses: filters.statuses,
+  };
+
+  if (event === "snapshot") {
+    return dashboardState.getSnapshot(filtersOnly);
+  }
+
+  if (event === "node.update") {
+    return {
+      nodes: dashboardState.filterNodes(nodeRegistry.listNodes(), filtersOnly),
+      stats: dashboardState.getStats(nodeRegistry.listNodes(), filtersOnly),
+      filters: dashboardState.getFilterOptions(),
+    };
+  }
+
+  if (event === "task.execution") {
+    return {
+      recentExecutions: dashboardState.getExecutions(24, filtersOnly),
+      stats: dashboardState.getStats(nodeRegistry.listNodes(), filtersOnly),
+    };
+  }
+
+  if (event === "log.append") {
+    return {
+      logs: dashboardState.getLogs(40, filtersOnly),
+      totalLogs: dashboardState.getLogs(250, filtersOnly).length,
+      lastUpdatedAt: Date.now(),
+    };
+  }
+
+  if (event === "score.change") {
+    const matchingNodes = dashboardState.filterNodes([payload.node], filtersOnly);
+
+    if (matchingNodes.length === 0) {
+      return null;
+    }
+
+    return {
+      node: payload.node,
+      previousScore: payload.previousScore,
+      stats: dashboardState.getStats(nodeRegistry.listNodes(), filtersOnly),
+    };
+  }
+
+  return payload;
+}
+
+function createApiKeyValue() {
+  return `pvn_${crypto.randomBytes(18).toString("hex")}`;
+}
 
 dashboardState.setNodes(nodeRegistry.listNodes(), { event: "snapshot" });
 nodeRegistry.cleanupInactiveNodes();
@@ -135,7 +269,7 @@ app.get(["/dashboard", "/dashboard/"], (_request, response) => {
 
 app.use("/dashboard", (request, response, next) => {
   if (request.path === "/session") {
-    if (!apiKeyAuth.ensureAuthorized(request, response)) {
+    if (!apiKeyAuth.ensureAuthorized(request, response, { allowedRoles: DASHBOARD_ROLES })) {
       return;
     }
 
@@ -143,7 +277,21 @@ app.use("/dashboard", (request, response, next) => {
     return;
   }
 
-  if (!apiKeyAuth.ensureAuthorized(request, response, { allowSession: true })) {
+  if (!apiKeyAuth.ensureAuthorized(request, response, {
+    allowSession: true,
+    allowedRoles: DASHBOARD_ROLES,
+  })) {
+    return;
+  }
+
+  next();
+});
+
+app.use("/admin", (request, response, next) => {
+  if (!apiKeyAuth.ensureAuthorized(request, response, {
+    allowSession: true,
+    allowedRoles: ADMIN_ROLES,
+  })) {
     return;
   }
 
@@ -151,7 +299,7 @@ app.use("/dashboard", (request, response, next) => {
 });
 
 app.post("/register-node", (request, response) => {
-  if (!apiKeyAuth.ensureAuthorized(request, response)) {
+  if (!apiKeyAuth.ensureAuthorized(request, response, { allowedRoles: NODE_ROUTE_ROLES })) {
     return;
   }
 
@@ -177,6 +325,10 @@ app.post("/register-node", (request, response) => {
 });
 
 app.post("/heartbeat", (request, response) => {
+  if (!apiKeyAuth.ensureAuthorized(request, response, { allowedRoles: NODE_ROUTE_ROLES })) {
+    return;
+  }
+
   try {
     const result = nodeRegistry.heartbeat({
       url: request.body?.url,
@@ -201,11 +353,79 @@ app.post("/heartbeat", (request, response) => {
   }
 });
 
-app.post("/dashboard/session", (_request, response) => {
-  apiKeyAuth.setSessionCookie(response);
+app.post("/dashboard/session", (request, response) => {
+  const session = apiKeyAuth.createSessionFromApiKey(request, response, DASHBOARD_ROLES);
+
+  if (!session) {
+    return;
+  }
+
+  emitCoordinatorLog(
+    `[coordinator] dashboard session opened: role=${session.role}`,
+    {
+      type: "auth.session.create",
+      metadata: {
+        role: session.role,
+        keyExpiresAt: session.keyExpiresAt,
+        sessionExpiresAt: session.expiresAt,
+      },
+    },
+  );
 
   return response.json({
     success: true,
+    session,
+  });
+});
+
+app.post("/dashboard/session/renew", (request, response) => {
+  const session = apiKeyAuth.renewSession(request, response, DASHBOARD_ROLES);
+
+  if (!session) {
+    return;
+  }
+
+  emitCoordinatorLog(
+    `[coordinator] dashboard session renewed: role=${session.role}`,
+    {
+      type: "auth.session.renew",
+      metadata: {
+        role: session.role,
+        keyExpiresAt: session.keyExpiresAt,
+        sessionExpiresAt: session.expiresAt,
+      },
+    },
+  );
+
+  return response.json({
+    success: true,
+    session,
+  });
+});
+
+app.post("/dashboard/logout", (request, response) => {
+  const sessionPrincipal = apiKeyAuth.getSessionPrincipal(request, DASHBOARD_ROLES);
+  apiKeyAuth.clearSessionCookie(response, request);
+
+  emitCoordinatorLog(
+    `[coordinator] dashboard session closed: role=${sessionPrincipal.ok ? sessionPrincipal.principal.role : "unknown"}`,
+    {
+      type: "auth.session.logout",
+      metadata: {
+        role: sessionPrincipal.ok ? sessionPrincipal.principal.role : "unknown",
+      },
+    },
+  );
+
+  return response.json({
+    success: true,
+  });
+});
+
+app.get("/dashboard/meta", (request, response) => {
+  response.json({
+    filters: dashboardState.getFilterOptions(),
+    session: buildSessionPayload(request),
   });
 });
 
@@ -218,8 +438,9 @@ app.get("/nodes", (_request, response) => {
   });
 });
 
-app.get("/dashboard/nodes", (_request, response) => {
-  const nodes = nodeRegistry.listNodes().map((node) => ({
+app.get("/dashboard/nodes", (request, response) => {
+  const filters = parseDashboardFilters(request.query);
+  const nodes = dashboardState.filterNodes(nodeRegistry.listNodes(), filters).map((node) => ({
     ...node,
     tasksHandled: node.totalTasks,
   }));
@@ -231,21 +452,25 @@ app.get("/dashboard/nodes", (_request, response) => {
   });
 });
 
-app.get("/dashboard/stats", (_request, response) => {
-  response.json(dashboardState.getStats(nodeRegistry.listNodes()));
+app.get("/dashboard/stats", (request, response) => {
+  const filters = parseDashboardFilters(request.query);
+  response.json(dashboardState.getStats(nodeRegistry.listNodes(), filters));
 });
 
 app.get("/dashboard/logs", (request, response) => {
   const limit = Number(request.query?.limit || 100);
+  const filters = parseDashboardFilters(request.query);
 
   response.json({
-    logs: dashboardState.getLogs(limit),
-    totalLogs: dashboardState.getLogs().length,
+    logs: dashboardState.getLogs(limit, filters),
+    totalLogs: dashboardState.getLogs(250, filters).length,
     lastUpdatedAt: Date.now(),
   });
 });
 
 app.get("/dashboard/stream", (request, response) => {
+  const filters = parseDashboardFilters(request.query);
+
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache, no-transform");
   response.setHeader("Connection", "keep-alive");
@@ -258,10 +483,20 @@ app.get("/dashboard/stream", (request, response) => {
     response.write(`data: ${JSON.stringify(payload)}\n\n`);
   };
 
-  sendEvent("snapshot", dashboardState.getSnapshot());
+  sendEvent("snapshot", buildDashboardEventPayload("snapshot", filters, {}));
 
   const unsubscribe = dashboardState.subscribe(({ event, payload }) => {
-    sendEvent(event, payload);
+    if (filters.events.length > 0 && !filters.events.includes(event)) {
+      return;
+    }
+
+    const eventPayload = buildDashboardEventPayload(event, filters, payload);
+
+    if (!eventPayload) {
+      return;
+    }
+
+    sendEvent(event, eventPayload);
   });
   const keepAlive = setInterval(() => {
     response.write(": keepalive\n\n");
@@ -271,6 +506,96 @@ app.get("/dashboard/stream", (request, response) => {
     clearInterval(keepAlive);
     unsubscribe();
     response.end();
+  });
+});
+
+app.post("/admin/api-keys/create", (request, response) => {
+  const role = String(request.body?.role || "").trim().toLowerCase();
+  const requestedKey = String(request.body?.key || "").trim();
+  const expiresInMs = Number(request.body?.expiresInMs || createdApiKeyTtlMs);
+  const explicitExpiresAt = Number(request.body?.expiresAt || 0);
+  const expiresAt = explicitExpiresAt > 0 ? explicitExpiresAt : Date.now() + expiresInMs;
+
+  if (!VALID_API_KEY_ROLES.includes(role)) {
+    return response.status(400).json({
+      error: `role must be one of: ${VALID_API_KEY_ROLES.join(", ")}`,
+    });
+  }
+
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    return response.status(400).json({
+      error: "expiresAt must be in the future.",
+    });
+  }
+
+  try {
+    const apiKey = coordinatorStore.createApiKey({
+      key: requestedKey || createApiKeyValue(),
+      role,
+      createdAt: Date.now(),
+      expiresAt,
+      status: "active",
+    });
+
+    emitCoordinatorLog(
+      `[coordinator] api key created: role=${apiKey.role} key=${maskApiKeyValue(apiKey.key)}`,
+      {
+        type: "auth.api_key.create",
+        metadata: {
+          actorRole: request.auth?.role || "unknown",
+          key: maskApiKeyValue(apiKey.key),
+          role: apiKey.role,
+          status: apiKey.status,
+          expiresAt: apiKey.expiresAt,
+        },
+      },
+    );
+
+    return response.json({
+      success: true,
+      apiKey,
+    });
+  } catch (error) {
+    return response.status(400).json({
+      error: error.message,
+    });
+  }
+});
+
+app.get("/admin/api-keys", (request, response) => {
+  response.json({
+    apiKeys: coordinatorStore.listApiKeys({
+      role: request.query?.role,
+      status: request.query?.status,
+    }),
+  });
+});
+
+app.post("/admin/api-keys/revoke", (request, response) => {
+  const revokedApiKey = coordinatorStore.revokeApiKey(request.body?.key);
+
+  if (!revokedApiKey) {
+    return response.status(404).json({
+      error: "API key not found.",
+    });
+  }
+
+  emitCoordinatorLog(
+    `[coordinator] api key revoked: role=${revokedApiKey.role} key=${maskApiKeyValue(revokedApiKey.key)}`,
+    {
+      type: "auth.api_key.revoke",
+      metadata: {
+        actorRole: request.auth?.role || "unknown",
+        key: maskApiKeyValue(revokedApiKey.key),
+        role: revokedApiKey.role,
+        status: revokedApiKey.status,
+      },
+    },
+  );
+
+  return response.json({
+    success: true,
+    apiKey: revokedApiKey,
   });
 });
 
@@ -288,6 +613,7 @@ app.get("/health", async (_request, response) => {
     nodesHealthy: healthyNodeUrls.length,
     aggregatorConfigured: Boolean(aggregatorUrl),
     encryptionEnabled,
+    databasePath: coordinatorStore.filePath,
   });
 });
 

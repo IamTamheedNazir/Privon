@@ -1,15 +1,6 @@
 const crypto = require("crypto");
 
-function secureEqual(left, right) {
-  const leftBuffer = Buffer.from(String(left || ""));
-  const rightBuffer = Buffer.from(String(right || ""));
-
-  if (leftBuffer.length !== rightBuffer.length) {
-    return false;
-  }
-
-  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
-}
+const { isRoleAllowed } = require("./roles");
 
 function parseCookies(cookieHeader) {
   if (!cookieHeader || typeof cookieHeader !== "string") {
@@ -40,68 +31,149 @@ function extractBearerToken(request) {
 }
 
 function createApiKeyAuth(options = {}) {
-  const apiKey = String(options.apiKey || "").trim();
+  const keyStore = options.keyStore;
+  const now = options.now || Date.now;
   const sessionCookieName = options.sessionCookieName || "privon_dashboard_session";
-  const sessionTtlMs = options.sessionTtlMs ?? 1000 * 60 * 60 * 12;
+  const sessionTtlMs = Number(options.sessionTtlMs || 1000 * 60 * 30);
   const sessions = new Map();
 
-  function isConfigured() {
-    return apiKey.length > 0;
-  }
-
-  function isValidApiKey(candidate) {
-    if (!isConfigured()) {
-      return true;
-    }
-
-    return secureEqual(candidate, apiKey);
-  }
-
-  function createSession() {
-    const token = crypto.randomBytes(24).toString("hex");
-    const expiresAt = Date.now() + sessionTtlMs;
-    sessions.set(token, expiresAt);
-    return { token, expiresAt };
+  if (!keyStore) {
+    throw new Error("createApiKeyAuth requires a keyStore instance.");
   }
 
   function cleanupExpiredSessions() {
-    const currentTime = Date.now();
+    const currentTime = now();
 
-    for (const [token, expiresAt] of sessions.entries()) {
-      if (expiresAt <= currentTime) {
+    for (const [token, session] of sessions.entries()) {
+      if (session.expiresAt <= currentTime) {
         sessions.delete(token);
       }
     }
   }
 
-  function hasValidSession(request) {
-    cleanupExpiredSessions();
-    const cookies = parseCookies(request.headers.cookie);
-    const token = cookies[sessionCookieName];
+  function formatCookie(token, expiresAt) {
+    const maxAgeSeconds = Math.max(0, Math.floor((expiresAt - now()) / 1000));
+    return `${sessionCookieName}=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}`;
+  }
+
+  function buildErrorRecord(message, status, code) {
+    return {
+      ok: false,
+      message,
+      status,
+      code,
+    };
+  }
+
+  function validatePrincipal(principal, allowedRoles = []) {
+    if (!principal) {
+      return buildErrorRecord("Unauthorized", 401, "invalid_api_key");
+    }
+
+    if (principal.status === "expired") {
+      return buildErrorRecord("API key expired.", 401, "expired_api_key");
+    }
+
+    if (principal.status !== "active") {
+      return buildErrorRecord("API key inactive.", 401, "inactive_api_key");
+    }
+
+    if (allowedRoles.length > 0 && !isRoleAllowed(principal.role, allowedRoles)) {
+      return buildErrorRecord("Forbidden", 403, "insufficient_role");
+    }
+
+    return {
+      ok: true,
+      principal,
+    };
+  }
+
+  function authenticateApiKey(candidate, allowedRoles = []) {
+    const token = String(candidate || "").trim();
 
     if (!token) {
-      return false;
+      return buildErrorRecord("Unauthorized", 401, "missing_api_key");
     }
 
-    const expiresAt = sessions.get(token);
+    return validatePrincipal(keyStore.getApiKey(token), allowedRoles);
+  }
 
-    if (!expiresAt || expiresAt <= Date.now()) {
-      sessions.delete(token);
-      return false;
+  function getSessionToken(request) {
+    const cookies = parseCookies(request.headers.cookie);
+    return cookies[sessionCookieName] || "";
+  }
+
+  function getSessionPrincipal(request, allowedRoles = []) {
+    cleanupExpiredSessions();
+
+    const sessionToken = getSessionToken(request);
+
+    if (!sessionToken) {
+      return buildErrorRecord("Unauthorized", 401, "missing_session");
     }
 
-    return true;
+    const session = sessions.get(sessionToken);
+
+    if (!session || session.expiresAt <= now()) {
+      sessions.delete(sessionToken);
+      return buildErrorRecord("Dashboard session expired.", 401, "expired_session");
+    }
+
+    const validatedPrincipal = validatePrincipal(keyStore.getApiKey(session.key), allowedRoles);
+
+    if (!validatedPrincipal.ok) {
+      sessions.delete(sessionToken);
+      return validatedPrincipal;
+    }
+
+    return {
+      ok: true,
+      sessionToken,
+      principal: {
+        ...validatedPrincipal.principal,
+        sessionExpiresAt: session.expiresAt,
+      },
+    };
   }
 
-  function setSessionCookie(response) {
-    const { token } = createSession();
-    response.setHeader(
-      "Set-Cookie",
-      `${sessionCookieName}=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(sessionTtlMs / 1000)}`,
-    );
+  function createSession(principal, previousToken = "") {
+    if (previousToken) {
+      sessions.delete(previousToken);
+    }
+
+    const expiresAt = Math.min(now() + sessionTtlMs, Number(principal.expiresAt));
+    const token = crypto.randomBytes(24).toString("hex");
+    sessions.set(token, {
+      key: principal.key,
+      role: principal.role,
+      expiresAt,
+    });
+
+    return {
+      token,
+      expiresAt,
+      role: principal.role,
+    };
   }
 
-  function clearSessionCookie(response) {
+  function setSessionCookie(response, principal, previousToken = "") {
+    const session = createSession(principal, previousToken);
+    response.setHeader("Set-Cookie", formatCookie(session.token, session.expiresAt));
+
+    return {
+      role: session.role,
+      expiresAt: session.expiresAt,
+      keyExpiresAt: principal.expiresAt,
+    };
+  }
+
+  function clearSessionCookie(response, request) {
+    const sessionToken = request ? getSessionToken(request) : "";
+
+    if (sessionToken) {
+      sessions.delete(sessionToken);
+    }
+
     response.setHeader(
       "Set-Cookie",
       `${sessionCookieName}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`,
@@ -110,30 +182,105 @@ function createApiKeyAuth(options = {}) {
 
   function ensureAuthorized(request, response, options = {}) {
     const allowSession = options.allowSession ?? false;
-    const token = extractBearerToken(request);
+    const allowedRoles = options.allowedRoles || [];
+    const bearerToken = extractBearerToken(request);
+    let failedResult = null;
 
-    if (isValidApiKey(token)) {
-      return true;
+    if (bearerToken) {
+      const bearerResult = authenticateApiKey(bearerToken, allowedRoles);
+
+      if (bearerResult.ok) {
+        request.auth = bearerResult.principal;
+        request.authSource = "api_key";
+        return true;
+      }
+
+      failedResult = bearerResult;
     }
 
-    if (allowSession && hasValidSession(request)) {
-      return true;
+    if (allowSession) {
+      const sessionResult = getSessionPrincipal(request, allowedRoles);
+
+      if (sessionResult.ok) {
+        request.auth = sessionResult.principal;
+        request.authSource = "session";
+        request.session = {
+          token: sessionResult.sessionToken,
+          expiresAt: sessionResult.principal.sessionExpiresAt,
+        };
+        return true;
+      }
+
+      if (!failedResult) {
+        failedResult = sessionResult;
+      }
     }
 
-    response.status(401).json({
-      error: "Unauthorized",
+    response.status(failedResult?.status || 401).json({
+      error: failedResult?.message || "Unauthorized",
+      code: failedResult?.code || "unauthorized",
     });
     return false;
   }
 
+  function createSessionFromApiKey(request, response, allowedRoles = []) {
+    const apiKeyResult = authenticateApiKey(extractBearerToken(request), allowedRoles);
+
+    if (!apiKeyResult.ok) {
+      response.status(apiKeyResult.status).json({
+        error: apiKeyResult.message,
+        code: apiKeyResult.code,
+      });
+      return null;
+    }
+
+    return setSessionCookie(response, apiKeyResult.principal);
+  }
+
+  function renewSession(request, response, allowedRoles = []) {
+    let principal = null;
+    let previousToken = "";
+
+    const bearerToken = extractBearerToken(request);
+
+    if (bearerToken) {
+      const bearerResult = authenticateApiKey(bearerToken, allowedRoles);
+
+      if (!bearerResult.ok) {
+        response.status(bearerResult.status).json({
+          error: bearerResult.message,
+          code: bearerResult.code,
+        });
+        return null;
+      }
+
+      principal = bearerResult.principal;
+    } else {
+      const sessionResult = getSessionPrincipal(request, allowedRoles);
+
+      if (!sessionResult.ok) {
+        response.status(sessionResult.status).json({
+          error: sessionResult.message,
+          code: sessionResult.code,
+        });
+        return null;
+      }
+
+      principal = sessionResult.principal;
+      previousToken = sessionResult.sessionToken;
+    }
+
+    return setSessionCookie(response, principal, previousToken);
+  }
+
   return {
-    isConfigured,
-    isValidApiKey,
-    extractBearerToken,
-    ensureAuthorized,
-    setSessionCookie,
     clearSessionCookie,
-    hasValidSession,
+    createSessionFromApiKey,
+    ensureAuthorized,
+    extractBearerToken,
+    getSessionPrincipal,
+    renewSession,
+    setSessionCookie,
   };
 }
 

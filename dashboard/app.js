@@ -1,8 +1,14 @@
-const THEMES = [
+ï»¿const THEMES = [
   { id: "nocturne", label: "Nocturne" },
   { id: "voltage", label: "Voltage" },
   { id: "paper", label: "Paper" },
 ];
+const EVENT_TYPES = ["node.update", "score.change", "task.execution", "log.append"];
+const HUMAN_API_KEY_ROLES = ["viewer", "operator", "super_admin"];
+const VIEW_IDS = {
+  OVERVIEW: "overview",
+  API_KEYS: "api-keys",
+};
 const API_KEY_STORAGE_KEY = "privon-dashboard-api-key";
 const STREAM_RECONNECT_DELAY_MS = 2500;
 
@@ -12,6 +18,29 @@ const state = {
   connected: false,
   eventSource: null,
   reconnectTimer: null,
+  renewalTimer: null,
+  view: VIEW_IDS.OVERVIEW,
+  filterOptions: {
+    shardIds: [],
+    replicaGroups: [],
+    eventTypes: [...EVENT_TYPES],
+  },
+  filters: {
+    shardId: "",
+    replicaGroup: "",
+    events: [...EVENT_TYPES],
+  },
+  session: {
+    role: "viewer",
+    expiresAt: 0,
+    keyExpiresAt: 0,
+  },
+  admin: {
+    apiKeys: [],
+    message: "",
+    tone: "info",
+    revealedKeys: {},
+  },
   snapshot: {
     nodes: [],
     stats: {
@@ -40,6 +69,25 @@ const apiKeyInput = document.getElementById("api-key-input");
 const authStatus = document.getElementById("auth-status");
 const connectButton = document.getElementById("connect-button");
 const connectionPill = document.getElementById("connection-pill");
+const shardFilter = document.getElementById("shard-filter");
+const replicaFilter = document.getElementById("replica-filter");
+const eventFilterBar = document.getElementById("event-filter-bar");
+const clearFiltersButton = document.getElementById("clear-filters-button");
+const sessionRole = document.getElementById("session-role");
+const sessionExpiry = document.getElementById("session-expiry");
+const renewButton = document.getElementById("renew-button");
+const logoutButton = document.getElementById("logout-button");
+const focusCopy = document.getElementById("focus-copy");
+const viewButtons = Array.from(document.querySelectorAll("[data-view-button]"));
+const viewPanels = Array.from(document.querySelectorAll("[data-view-panel]"));
+const apiKeysNavItem = document.getElementById("api-keys-nav-item");
+const adminMessage = document.getElementById("admin-message");
+const apiKeyList = document.getElementById("api-key-list");
+const apiKeyCreateForm = document.getElementById("api-key-create-form");
+const apiKeyRoleInput = document.getElementById("api-key-role");
+const apiKeyExpiresAtInput = document.getElementById("api-key-expires-at");
+const createApiKeyButton = document.getElementById("create-api-key-button");
+const refreshApiKeysButton = document.getElementById("refresh-api-keys-button");
 
 function formatRelativeTime(timestamp) {
   if (!timestamp) {
@@ -60,8 +108,78 @@ function formatRelativeTime(timestamp) {
   return `${minutes}m ago`;
 }
 
+function formatFutureTime(timestamp) {
+  if (!timestamp) {
+    return "pending";
+  }
+
+  const deltaSeconds = Math.max(0, Math.round((timestamp - Date.now()) / 1000));
+
+  if (deltaSeconds < 60) {
+    return `${deltaSeconds}s`;
+  }
+
+  const minutes = Math.round(deltaSeconds / 60);
+  return `${minutes}m`;
+}
+
+function formatDateTime(timestamp) {
+  if (!timestamp) {
+    return "pending";
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(timestamp));
+}
+
+function toDatetimeLocalValue(timestamp) {
+  const date = new Date(timestamp);
+  const pad = (value) => String(value).padStart(2, "0");
+
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function humanizeRole(role) {
+  return String(role || "viewer").replaceAll("_", " ");
+}
+
+function isSuperAdmin() {
+  return state.session.role === "super_admin";
+}
+
+function maskApiKey(key) {
+  const value = String(key || "").trim();
+
+  if (!value) {
+    return "****";
+  }
+
+  return `****${value.slice(-4)}`;
+}
+
 function createEmptyState(message) {
   return `<div class="empty-state">${message}</div>`;
+}
+
+function buildFilterQuery(includeEvents = false) {
+  const query = new URLSearchParams();
+
+  if (state.filters.shardId) {
+    query.set("shardId", state.filters.shardId);
+  }
+
+  if (state.filters.replicaGroup) {
+    query.set("replicaGroup", state.filters.replicaGroup);
+  }
+
+  if (includeEvents && state.filters.events.length > 0) {
+    query.set("events", state.filters.events.join(","));
+  }
+
+  const serialized = query.toString();
+  return serialized ? `?${serialized}` : "";
 }
 
 function applyTheme(themeId) {
@@ -102,11 +220,9 @@ function setConnectionState(mode, message) {
   };
   const className = mode === "live"
     ? "status-active"
-    : mode === "connecting"
+    : mode === "connecting" || mode === "degraded"
       ? "status-probation"
-      : mode === "degraded"
-        ? "status-probation"
-        : "status-inactive";
+      : "status-inactive";
 
   connectionPill.className = `connection-pill ${className}`;
   connectionPill.textContent = labels[mode] || mode;
@@ -120,6 +236,46 @@ function updateVisibility() {
   const hasSession = state.connected;
   workspace.hidden = !hasSession;
   authShell.hidden = hasSession;
+}
+
+function renderSession() {
+  sessionRole.textContent = humanizeRole(state.session.role || "viewer");
+  sessionExpiry.textContent = state.session.expiresAt
+    ? `${formatFutureTime(state.session.expiresAt)} remaining`
+    : "pending";
+}
+
+function syncViewPanels() {
+  if (!isSuperAdmin() && state.view === VIEW_IDS.API_KEYS) {
+    state.view = VIEW_IDS.OVERVIEW;
+  }
+
+  apiKeysNavItem.hidden = !isSuperAdmin();
+
+  viewButtons.forEach((button) => {
+    const isActive = button.dataset.viewButton === state.view;
+    button.classList.toggle("active", isActive);
+  });
+
+  viewPanels.forEach((panel) => {
+    panel.hidden = panel.dataset.viewPanel !== state.view;
+  });
+}
+
+function setAdminMessage(message = "", tone = "info") {
+  state.admin.message = message;
+  state.admin.tone = tone;
+
+  if (!message) {
+    adminMessage.hidden = true;
+    adminMessage.textContent = "";
+    adminMessage.className = "message-banner";
+    return;
+  }
+
+  adminMessage.hidden = false;
+  adminMessage.textContent = message;
+  adminMessage.className = `message-banner tone-${tone}`;
 }
 
 function renderSummary(stats) {
@@ -159,7 +315,7 @@ function renderSummary(stats) {
 
 function renderNodes(nodes) {
   if (!nodes.length) {
-    nodeTable.innerHTML = createEmptyState("No nodes registered yet.");
+    nodeTable.innerHTML = createEmptyState("No nodes match the current drill-down filters.");
     return;
   }
 
@@ -169,7 +325,7 @@ function renderNodes(nodes) {
       <article class="node-row">
         <div class="meta-stack">
           <strong class="node-url">${node.url}</strong>
-          <span class="meta">${node.shardId} · ${node.replicaGroup}</span>
+          <span class="meta">${node.shardId} Â· ${node.replicaGroup}</span>
         </div>
         <div class="meta-stack">
           <span class="status-pill ${statusClass(node.status)}">${node.status}</span>
@@ -196,7 +352,7 @@ function renderNodes(nodes) {
 
 function renderTasks(executions) {
   if (!executions.length) {
-    taskStream.innerHTML = createEmptyState("No fragment executions recorded yet.");
+    taskStream.innerHTML = createEmptyState("No fragment executions match the current filters.");
     return;
   }
 
@@ -205,7 +361,7 @@ function renderTasks(executions) {
       <div class="meta-stack">
         <span class="status-pill ${task.status === "verified" ? "status-active" : "status-probation"}">${task.status}</span>
         <strong>Fragment ${task.fragmentIndex}: ${task.fragment || "n/a"}</strong>
-        <span class="meta">job ${task.jobId} · ${task.replicaGroup}</span>
+        <span class="meta">job ${task.jobId} Â· ${task.replicaGroup}</span>
       </div>
       <div class="task-grid">
         <div>
@@ -223,7 +379,7 @@ function renderTasks(executions) {
 
 function renderLogs(logs) {
   if (!logs.length) {
-    logConsole.innerHTML = createEmptyState("No coordinator logs yet.");
+    logConsole.innerHTML = createEmptyState("No coordinator logs match the current filters.");
     return;
   }
 
@@ -231,11 +387,35 @@ function renderLogs(logs) {
     <article class="log-item">
       <span class="log-level level-${entry.level}"></span>
       <div class="meta-stack">
-        <span class="log-meta">${entry.type} · ${formatRelativeTime(entry.timestamp)}</span>
+        <span class="log-meta">${entry.type} Â· ${formatRelativeTime(entry.timestamp)}</span>
         <strong>${entry.message}</strong>
       </div>
     </article>
   `).join("");
+}
+
+function setShardFilter(shardId) {
+  state.filters.shardId = shardId;
+  applyFilters();
+}
+
+function setReplicaFilter(replicaGroup) {
+  state.filters.replicaGroup = replicaGroup;
+  applyFilters();
+}
+
+function attachDrilldownHandlers() {
+  document.querySelectorAll("[data-shard-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setShardFilter(button.dataset.shardId || "");
+    });
+  });
+
+  document.querySelectorAll("[data-replica-group]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setReplicaFilter(button.dataset.replicaGroup || "");
+    });
+  });
 }
 
 function renderReplicaHealth(replicaGroups) {
@@ -248,7 +428,7 @@ function renderReplicaHealth(replicaGroups) {
   replicaLanes.innerHTML = replicaGroups.map((group) => {
     const healthWidth = Math.max(10, Math.round((group.activeNodes / Math.max(1, group.totalNodes)) * 100));
     return `
-      <article class="lane-pill">
+      <button class="lane-pill interactive-card" type="button" data-replica-group="${group.key}">
         <div class="lane-head">
           <strong>${group.key}</strong>
           <span class="meta">${group.activeNodes}/${group.totalNodes} active</span>
@@ -258,18 +438,18 @@ function renderReplicaHealth(replicaGroups) {
           <span class="meta">avg score ${group.averageScore}</span>
           <span class="meta">${group.tasksHandled} tasks</span>
         </div>
-      </article>
+      </button>
     `;
   }).join("");
 
   laneList.innerHTML = replicaGroups.map((group) => `
-    <article class="lane-item">
+    <button class="lane-item interactive-card" type="button" data-replica-group="${group.key}">
       <div class="lane-head">
         <strong>${group.key}</strong>
-        <span class="meta">${group.probationNodes} probation · ${group.inactiveNodes} inactive</span>
+        <span class="meta">${group.probationNodes} probation Â· ${group.inactiveNodes} inactive</span>
       </div>
       <div class="inline-list">${group.members.map((member) => `<span class="inline-tag ${statusClass(member.status)}">${member.shardId}</span>`).join("")}</div>
-    </article>
+    </button>
   `).join("");
 }
 
@@ -285,7 +465,7 @@ function renderShardCharts(shardSummaries) {
     const loadWidth = Math.max(8, Math.round(((summary.tasksHandled || 0) / maxTasks) * 100));
     const scoreWidth = Math.max(8, Math.round((summary.averageScore / 200) * 100));
     return `
-      <article class="shard-card">
+      <button class="shard-card interactive-card" type="button" data-shard-id="${summary.key}">
         <div class="lane-head">
           <strong>${summary.key}</strong>
           <span class="meta">${summary.totalNodes} node(s)</span>
@@ -300,9 +480,135 @@ function renderShardCharts(shardSummaries) {
           <div class="chart-track score"><span style="width:${scoreWidth}%"></span></div>
           <span class="meta">${summary.averageScore}</span>
         </div>
+      </button>
+    `;
+  }).join("");
+}
+
+function renderFocusCard(stats) {
+  const hasShard = Boolean(state.filters.shardId);
+  const hasReplica = Boolean(state.filters.replicaGroup);
+
+  if (!hasShard && !hasReplica) {
+    focusCopy.innerHTML = `
+      <p>Showing the full network surface.</p>
+      <p class="meta">Use the controls above or click a shard or replica card to narrow the live stream.</p>
+    `;
+    return;
+  }
+
+  focusCopy.innerHTML = `
+    <p><strong>Focused scope</strong></p>
+    <p>${hasShard ? `Shard ${state.filters.shardId}` : "All shards"} Â· ${hasReplica ? `Replica ${state.filters.replicaGroup}` : "All replicas"}</p>
+    <p class="meta">${stats.summary.totalNodes || 0} nodes, ${stats.summary.totalTasksHandled || 0} tasks, ${stats.summary.activeNodes || 0} active lanes in this view.</p>
+  `;
+}
+
+function renderFilters() {
+  const shardOptions = ["", ...state.filterOptions.shardIds.filter((value) => value !== state.filters.shardId)];
+  shardFilter.innerHTML = shardOptions.map((value) => `
+    <option value="${value}">${value || "All shards"}</option>
+  `).join("");
+  shardFilter.value = state.filters.shardId;
+
+  const replicaOptions = ["", ...state.filterOptions.replicaGroups.filter((value) => value !== state.filters.replicaGroup)];
+  replicaFilter.innerHTML = replicaOptions.map((value) => `
+    <option value="${value}">${value || "All replica groups"}</option>
+  `).join("");
+  replicaFilter.value = state.filters.replicaGroup;
+
+  eventFilterBar.innerHTML = EVENT_TYPES.map((eventName) => `
+    <button
+      class="event-chip ${state.filters.events.includes(eventName) ? "active" : ""}"
+      data-event-name="${eventName}"
+      type="button"
+    >${eventName}</button>
+  `).join("");
+
+  eventFilterBar.querySelectorAll("button").forEach((button) => {
+    button.addEventListener("click", () => {
+      const eventName = button.dataset.eventName;
+
+      if (state.filters.events.includes(eventName)) {
+        if (state.filters.events.length === 1) {
+          return;
+        }
+
+        state.filters.events = state.filters.events.filter((entry) => entry !== eventName);
+      } else {
+        state.filters.events = [...state.filters.events, eventName];
+      }
+
+      renderFilters();
+      connectStream();
+    });
+  });
+}
+function renderApiKeys() {
+  if (!isSuperAdmin()) {
+    apiKeyList.innerHTML = createEmptyState("Only super_admin sessions can manage API keys.");
+    return;
+  }
+
+  if (!state.admin.apiKeys.length) {
+    apiKeyList.innerHTML = createEmptyState("No managed keys yet. Create one to grant dashboard or node access.");
+    return;
+  }
+
+  apiKeyList.innerHTML = state.admin.apiKeys.map((record) => {
+    const isRevealed = Boolean(state.admin.revealedKeys[record.key]);
+    const keyLabel = isRevealed ? record.key : maskApiKey(record.key);
+    const isActive = record.status === "active";
+
+    return `
+      <article class="api-key-row">
+        <div class="api-key-main">
+          <button class="key-visibility-button" type="button" data-key-visibility="${record.key}">
+            ${keyLabel}
+          </button>
+          <span class="meta">${isRevealed ? "click to mask" : "click to reveal"}</span>
+        </div>
+        <div class="meta-stack">
+          <span class="mini-label">Role</span>
+          <strong>${humanizeRole(record.role)}</strong>
+        </div>
+        <div class="meta-stack">
+          <span class="mini-label">Created</span>
+          <strong>${formatDateTime(record.createdAt)}</strong>
+        </div>
+        <div class="meta-stack">
+          <span class="mini-label">Expires</span>
+          <strong>${formatDateTime(record.expiresAt)}</strong>
+        </div>
+        <div class="meta-stack">
+          <span class="status-pill ${statusClass(record.status === "active" ? "active" : "inactive")}">${record.status}</span>
+          <span class="meta">credential state</span>
+        </div>
+        <div class="api-key-actions">
+          <button
+            class="ghost-button revoke-button"
+            type="button"
+            data-revoke-key="${record.key}"
+            ${isActive ? "" : "disabled"}
+          >Revoke</button>
+        </div>
       </article>
     `;
   }).join("");
+
+  apiKeyList.querySelectorAll("[data-key-visibility]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const key = button.dataset.keyVisibility;
+      state.admin.revealedKeys[key] = !state.admin.revealedKeys[key];
+      renderApiKeys();
+    });
+  });
+
+  apiKeyList.querySelectorAll("[data-revoke-key]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await revokeApiKey(button.dataset.revokeKey);
+    });
+  });
 }
 
 function render(snapshot) {
@@ -310,12 +616,18 @@ function render(snapshot) {
   const stats = snapshot.stats || {};
   const logs = snapshot.logs || [];
 
+  renderSession();
+  syncViewPanels();
+  renderFilters();
   renderSummary(stats);
   renderNodes(nodes);
   renderTasks(stats.recentExecutions || []);
   renderLogs(logs);
   renderReplicaHealth(stats.replicaGroups || []);
   renderShardCharts(stats.shardSummaries || []);
+  renderFocusCard(stats);
+  renderApiKeys();
+  attachDrilldownHandlers();
   setLastUpdated(stats.lastUpdatedAt || Date.now());
 }
 
@@ -326,43 +638,25 @@ function updateSnapshot(partial) {
     logs: partial.logs || state.snapshot.logs || [],
   };
 
+  if (partial.filters) {
+    state.filterOptions = {
+      ...state.filterOptions,
+      ...partial.filters,
+    };
+  }
+
   render(state.snapshot);
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url, {
-    credentials: "same-origin",
-  });
-
-  if (response.status === 401) {
-    throw new Error("Unauthorized");
-  }
-
-  if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
-  }
-
-  return response.json();
-}
-
-async function loadSnapshot() {
-  const [nodes, stats, logs] = await Promise.all([
-    fetchJson("/dashboard/nodes"),
-    fetchJson("/dashboard/stats"),
-    fetchJson("/dashboard/logs?limit=24"),
-  ]);
-
-  updateSnapshot({
-    nodes: nodes.nodes || [],
-    stats,
-    logs: logs.logs || [],
-  });
-}
-
-function clearReconnectTimer() {
+function clearTimers() {
   if (state.reconnectTimer) {
     window.clearTimeout(state.reconnectTimer);
     state.reconnectTimer = null;
+  }
+
+  if (state.renewalTimer) {
+    window.clearTimeout(state.renewalTimer);
+    state.renewalTimer = null;
   }
 }
 
@@ -377,6 +671,109 @@ function scheduleReconnect() {
   }, STREAM_RECONNECT_DELAY_MS);
 }
 
+function scheduleSessionRenewal() {
+  if (!state.connected || !state.session.expiresAt) {
+    return;
+  }
+
+  if (state.renewalTimer) {
+    window.clearTimeout(state.renewalTimer);
+  }
+
+  const msRemaining = state.session.expiresAt - Date.now();
+  const leadTime = Math.min(60000, Math.max(5000, Math.floor(msRemaining / 2)));
+  const delay = Math.max(1000, msRemaining - leadTime);
+
+  state.renewalTimer = window.setTimeout(() => {
+    renewSession(true);
+  }, delay);
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, {
+    credentials: "same-origin",
+    ...options,
+  });
+
+  if (response.status === 401) {
+    throw new Error("Unauthorized");
+  }
+
+  if (response.status === 403) {
+    throw new Error("Forbidden");
+  }
+
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function loadApiKeys(options = {}) {
+  if (!isSuperAdmin()) {
+    state.admin.apiKeys = [];
+    renderApiKeys();
+    return;
+  }
+
+  const silent = options.silent ?? false;
+
+  try {
+    const response = await fetchJson("/admin/api-keys");
+    state.admin.apiKeys = response.apiKeys || [];
+    renderApiKeys();
+
+    if (!silent) {
+      setAdminMessage(`Loaded ${state.admin.apiKeys.length} managed key${state.admin.apiKeys.length === 1 ? "" : "s"}.`, "success");
+    }
+  } catch (error) {
+    renderApiKeys();
+
+    if (!silent) {
+      setAdminMessage(
+        error.message === "Forbidden"
+          ? "Only super_admin sessions can manage API keys."
+          : `Unable to load API keys: ${error.message}`,
+        "error",
+      );
+    }
+
+    if (error.message === "Unauthorized") {
+      await logout(false);
+    }
+  }
+}
+
+async function loadSnapshot() {
+  const query = buildFilterQuery(false);
+  const [meta, nodes, stats, logs] = await Promise.all([
+    fetchJson("/dashboard/meta"),
+    fetchJson(`/dashboard/nodes${query}`),
+    fetchJson(`/dashboard/stats${query}`),
+    fetchJson(`/dashboard/logs${query}${query ? "&" : "?"}limit=24`),
+  ]);
+
+  state.session = meta.session || state.session;
+  state.filterOptions = {
+    ...state.filterOptions,
+    ...(meta.filters || {}),
+  };
+
+  updateSnapshot({
+    nodes: nodes.nodes || [],
+    stats,
+    logs: logs.logs || [],
+    filters: meta.filters || {},
+  });
+
+  if (isSuperAdmin() && state.view === VIEW_IDS.API_KEYS) {
+    await loadApiKeys({ silent: true });
+  }
+
+  scheduleSessionRenewal();
+}
+
 function handleStreamEvent(eventName, payload) {
   if (eventName === "snapshot") {
     updateSnapshot(payload);
@@ -387,6 +784,7 @@ function handleStreamEvent(eventName, payload) {
     updateSnapshot({
       nodes: payload.nodes || state.snapshot.nodes,
       stats: payload.stats || state.snapshot.stats,
+      filters: payload.filters,
     });
     return;
   }
@@ -422,17 +820,20 @@ function connectStream() {
   }
 
   state.eventSource?.close();
-  clearReconnectTimer();
-  setConnectionState("connecting", "Secure session established. Opening live stream.");
+  if (state.reconnectTimer) {
+    window.clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
+  }
+  setConnectionState("connecting", "Secure session established. Opening filtered live stream.");
 
-  const eventSource = new EventSource("/dashboard/stream");
+  const eventSource = new EventSource(`/dashboard/stream${buildFilterQuery(true)}`);
   state.eventSource = eventSource;
 
   eventSource.addEventListener("open", () => {
-    setConnectionState("live", "Streaming node, task, and score updates live.");
+    setConnectionState("live", "Streaming filtered node, task, and score updates live.");
   });
 
-  ["snapshot", "node.update", "score.change", "task.execution", "log.append"].forEach((eventName) => {
+  ["snapshot", ...EVENT_TYPES].forEach((eventName) => {
     eventSource.addEventListener(eventName, (event) => {
       try {
         handleStreamEvent(eventName, JSON.parse(event.data));
@@ -463,36 +864,211 @@ async function establishSession(apiKey) {
   connectButton.disabled = true;
 
   try {
-    const response = await fetch("/dashboard/session", {
+    const response = await fetchJson("/dashboard/session", {
       method: "POST",
-      credentials: "same-origin",
       headers: {
         authorization: `Bearer ${trimmedApiKey}`,
       },
     });
 
-    if (response.status === 401) {
-      throw new Error("Unauthorized");
-    }
-
-    if (!response.ok) {
-      throw new Error(`Session request failed: ${response.status}`);
-    }
-
     sessionStorage.setItem(API_KEY_STORAGE_KEY, trimmedApiKey);
     state.apiKey = trimmedApiKey;
+    state.session = response.session || state.session;
     state.connected = true;
     updateVisibility();
     await loadSnapshot();
+    if (isSuperAdmin()) {
+      await loadApiKeys({ silent: true });
+    }
     connectStream();
   } finally {
     connectButton.disabled = false;
+  }
+}
+async function renewSession(background = false) {
+  try {
+    const response = await fetchJson("/dashboard/session/renew", {
+      method: "POST",
+    });
+    state.session = response.session || state.session;
+    renderSession();
+    scheduleSessionRenewal();
+  } catch (error) {
+    if (background && state.apiKey) {
+      try {
+        await establishSession(state.apiKey);
+        return;
+      } catch (sessionError) {
+        console.error(sessionError);
+      }
+    }
+
+    if (!background) {
+      authStatus.textContent = error.message === "Unauthorized"
+        ? "Session renewal failed. Log in again."
+        : error.message;
+    }
+
+    await logout(false);
+  }
+}
+
+async function logout(callApi = true) {
+  clearTimers();
+  state.eventSource?.close();
+  state.eventSource = null;
+
+  if (callApi) {
+    try {
+      await fetchJson("/dashboard/logout", { method: "POST" });
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  state.connected = false;
+  state.view = VIEW_IDS.OVERVIEW;
+  state.session = {
+    role: "viewer",
+    expiresAt: 0,
+    keyExpiresAt: 0,
+  };
+  state.admin = {
+    apiKeys: [],
+    message: "",
+    tone: "info",
+    revealedKeys: {},
+  };
+  state.snapshot = {
+    nodes: [],
+    stats: { summary: {}, replicaGroups: [], shardSummaries: [], recentExecutions: [] },
+    logs: [],
+  };
+  sessionStorage.removeItem(API_KEY_STORAGE_KEY);
+  state.apiKey = "";
+  updateVisibility();
+  renderSession();
+  syncViewPanels();
+  setAdminMessage("");
+  renderApiKeys();
+  setConnectionState("locked", "Dashboard session cleared.");
+}
+
+async function applyFilters() {
+  if (!state.connected) {
+    return;
+  }
+
+  await loadSnapshot();
+  connectStream();
+}
+
+async function switchView(viewId) {
+  if (viewId === VIEW_IDS.API_KEYS && !isSuperAdmin()) {
+    setAdminMessage("Only super_admin sessions can manage API keys.", "error");
+    state.view = VIEW_IDS.OVERVIEW;
+    syncViewPanels();
+    return;
+  }
+
+  state.view = viewId;
+  syncViewPanels();
+
+  if (state.view === VIEW_IDS.API_KEYS) {
+    await loadApiKeys({ silent: true });
+  }
+}
+
+async function createApiKey(event) {
+  event.preventDefault();
+
+  if (!isSuperAdmin()) {
+    setAdminMessage("Only super_admin sessions can create API keys.", "error");
+    return;
+  }
+
+  const role = apiKeyRoleInput.value;
+  const expiresAtValue = apiKeyExpiresAtInput.value;
+  const expiresAt = new Date(expiresAtValue).getTime();
+
+  if (!HUMAN_API_KEY_ROLES.includes(role)) {
+    setAdminMessage("Choose a valid dashboard role before creating a key.", "error");
+    return;
+  }
+
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    setAdminMessage("Choose an expiration date in the future.", "error");
+    return;
+  }
+
+  createApiKeyButton.disabled = true;
+
+  try {
+    const response = await fetchJson("/admin/api-keys/create", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        role,
+        expiresAt,
+      }),
+    });
+
+    state.admin.revealedKeys = {
+      ...state.admin.revealedKeys,
+      [response.apiKey.key]: false,
+    };
+
+    await loadApiKeys({ silent: true });
+    setAdminMessage(`Created ${humanizeRole(role)} key ${maskApiKey(response.apiKey.key)}.`, "success");
+    apiKeyRoleInput.value = "viewer";
+    apiKeyExpiresAtInput.value = toDatetimeLocalValue(Date.now() + (1000 * 60 * 60 * 24 * 30));
+  } catch (error) {
+    setAdminMessage(
+      error.message === "Forbidden"
+        ? "Only super_admin sessions can create API keys."
+        : `Unable to create API key: ${error.message}`,
+      "error",
+    );
+  } finally {
+    createApiKeyButton.disabled = false;
+  }
+}
+
+async function revokeApiKey(key) {
+  if (!key) {
+    return;
+  }
+
+  try {
+    const response = await fetchJson("/admin/api-keys/revoke", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ key }),
+    });
+
+    state.admin.apiKeys = state.admin.apiKeys.map((record) => (
+      record.key === key ? response.apiKey : record
+    ));
+    renderApiKeys();
+    setAdminMessage(`Revoked key ${maskApiKey(key)}.`, "success");
+  } catch (error) {
+    setAdminMessage(`Unable to revoke API key: ${error.message}`, "error");
   }
 }
 
 async function bootstrap() {
   applyTheme(state.theme);
   renderThemeButtons();
+  renderFilters();
+  renderSession();
+  syncViewPanels();
+  setAdminMessage("");
+  apiKeyRoleInput.value = "viewer";
+  apiKeyExpiresAtInput.value = toDatetimeLocalValue(Date.now() + (1000 * 60 * 60 * 24 * 30));
 
   if (state.apiKey) {
     apiKeyInput.value = state.apiKey;
@@ -502,6 +1078,9 @@ async function bootstrap() {
     state.connected = true;
     updateVisibility();
     await loadSnapshot();
+    if (isSuperAdmin()) {
+      await loadApiKeys({ silent: true });
+    }
     connectStream();
     return;
   } catch (error) {
@@ -539,14 +1118,53 @@ authForm.addEventListener("submit", async (event) => {
     state.connected = false;
     updateVisibility();
     setConnectionState("locked", error.message === "Unauthorized"
-      ? "API key rejected. Check the coordinator API key and try again."
+      ? "API key rejected. Check the coordinator key and try again."
       : error.message);
   }
 });
 
+viewButtons.forEach((button) => {
+  button.addEventListener("click", async () => {
+    await switchView(button.dataset.viewButton);
+  });
+});
+
+shardFilter.addEventListener("change", async () => {
+  state.filters.shardId = shardFilter.value;
+  await applyFilters();
+});
+
+replicaFilter.addEventListener("change", async () => {
+  state.filters.replicaGroup = replicaFilter.value;
+  await applyFilters();
+});
+
+clearFiltersButton.addEventListener("click", async () => {
+  state.filters.shardId = "";
+  state.filters.replicaGroup = "";
+  state.filters.events = [...EVENT_TYPES];
+  await applyFilters();
+});
+
+renewButton.addEventListener("click", async () => {
+  await renewSession(false);
+});
+
+logoutButton.addEventListener("click", async () => {
+  await logout(true);
+});
+
+apiKeyCreateForm.addEventListener("submit", async (event) => {
+  await createApiKey(event);
+});
+
+refreshApiKeysButton.addEventListener("click", async () => {
+  await loadApiKeys({ silent: false });
+});
+
 window.addEventListener("beforeunload", () => {
+  clearTimers();
   state.eventSource?.close();
-  clearReconnectTimer();
 });
 
 bootstrap();

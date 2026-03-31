@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -16,7 +16,7 @@
           <p class="eyebrow">Privon observability surface</p>
           <h1>Private Compute Network</h1>
           <p class="subcopy">
-            Live node health, shard-aware execution, probation recovery, and coordinator event flow.
+            Live node health, shard-aware execution, probation recovery, secure sessions, and event-filtered coordinator flow.
           </p>
         </div>
         <div class="masthead-actions">
@@ -32,9 +32,9 @@
       <section class="auth-shell" id="auth-shell">
         <div class="auth-copy">
           <p class="panel-kicker">Secure entry</p>
-          <h2>Authenticate once, then stay on the live SSE stream.</h2>
+          <h2>Authenticate once, then let the coordinator stream live state.</h2>
           <p class="subcopy compact-copy">
-            Dashboard APIs and node registration are protected with an API key. The browser upgrades into a secure coordinator session so live updates can stream without polling.
+            Dashboard APIs require a valid viewer, operator, or super_admin key. Sessions renew before expiry, and logout clears the stream immediately.
           </p>
         </div>
         <form class="auth-form" id="auth-form">
@@ -48,71 +48,198 @@
       </section>
 
       <main class="workspace" id="workspace" hidden>
-        <section class="hero-grid">
-          <div class="hero-copy">
-            <p class="hero-label">Network pulse</p>
-            <div class="metric-strip" id="summary-strip"></div>
-          </div>
-          <div class="hero-side">
-            <section class="hero-stack">
-              <div class="hero-stack-head">
-                <p class="panel-kicker">Replica groups</p>
-                <h2>Health by verification lane</h2>
+        <aside class="dashboard-sidebar">
+          <section class="control-panel sidebar-panel">
+            <div>
+              <p class="panel-kicker">Workspace</p>
+              <h2>Views</h2>
+            </div>
+            <nav class="sidebar-nav">
+              <button class="rail-button active" type="button" data-view-button="overview">Overview</button>
+              <button class="rail-button" type="button" id="api-keys-nav-item" data-view-button="api-keys" hidden>API Keys</button>
+            </nav>
+            <p class="subcopy compact-copy sidebar-copy">
+              Keep the network pulse live in one place, then move into key management only when you need to operate the control plane.
+            </p>
+          </section>
+
+          <section class="control-panel sidebar-panel">
+            <div>
+              <p class="panel-kicker">Session</p>
+              <h2>Role and expiry</h2>
+            </div>
+            <div class="session-meta">
+              <div class="meta-stack">
+                <span class="mini-label">Role</span>
+                <strong id="session-role">viewer</strong>
               </div>
-              <div class="hero-graph" id="replica-lanes"></div>
+              <div class="meta-stack">
+                <span class="mini-label">Renews at</span>
+                <strong id="session-expiry">pending</strong>
+              </div>
+            </div>
+            <div class="session-actions">
+              <button class="secondary-button" type="button" id="renew-button">Renew session</button>
+              <button class="ghost-button" type="button" id="logout-button">Logout</button>
+            </div>
+          </section>
+        </aside>
+
+        <section class="dashboard-stage">
+          <section class="view-panel" data-view-panel="overview">
+            <section class="control-grid">
+              <section class="control-panel filter-panel">
+                <div>
+                  <p class="panel-kicker">Stream filters</p>
+                  <h2>Shard, replica, and event scope</h2>
+                </div>
+                <div class="filter-grid">
+                  <label class="select-stack">
+                    <span class="mini-label">Shard</span>
+                    <select id="shard-filter"></select>
+                  </label>
+                  <label class="select-stack">
+                    <span class="mini-label">Replica group</span>
+                    <select id="replica-filter"></select>
+                  </label>
+                </div>
+                <div class="event-filter-bar" id="event-filter-bar"></div>
+                <div class="filter-actions">
+                  <button class="ghost-button" type="button" id="clear-filters-button">Clear filters</button>
+                </div>
+              </section>
+
+              <section class="control-panel focus-panel" id="focus-panel">
+                <div>
+                  <p class="panel-kicker">Drill-down</p>
+                  <h2>Selected network lane</h2>
+                </div>
+                <div class="focus-copy" id="focus-copy"></div>
+              </section>
             </section>
-            <section class="hero-stack">
-              <div class="hero-stack-head">
-                <p class="panel-kicker">Shard pressure</p>
-                <h2>Tasks and score by shard</h2>
+
+            <section class="hero-grid">
+              <div class="hero-copy">
+                <p class="hero-label">Network pulse</p>
+                <div class="metric-strip" id="summary-strip"></div>
               </div>
-              <div class="shard-chart" id="shard-chart"></div>
+              <div class="hero-side">
+                <section class="hero-stack">
+                  <div class="hero-stack-head">
+                    <p class="panel-kicker">Replica groups</p>
+                    <h2>Health by verification lane</h2>
+                  </div>
+                  <div class="hero-graph" id="replica-lanes"></div>
+                </section>
+                <section class="hero-stack">
+                  <div class="hero-stack-head">
+                    <p class="panel-kicker">Shard pressure</p>
+                    <h2>Tasks and score by shard</h2>
+                  </div>
+                  <div class="shard-chart" id="shard-chart"></div>
+                </section>
+              </div>
             </section>
-          </div>
-        </section>
 
-        <section class="panel-grid">
-          <section class="panel panel-wide">
-            <div class="panel-header">
-              <div>
-                <p class="panel-kicker">Node roster</p>
-                <h2>Active, probation, and sleeping capacity</h2>
-              </div>
-              <p class="panel-note">Live SSE stream</p>
-            </div>
-            <div class="node-table" id="node-table"></div>
+            <section class="panel-grid">
+              <section class="panel panel-wide">
+                <div class="panel-header">
+                  <div>
+                    <p class="panel-kicker">Node roster</p>
+                    <h2>Active, probation, and sleeping capacity</h2>
+                  </div>
+                  <p class="panel-note">Live SSE stream</p>
+                </div>
+                <div class="node-table" id="node-table"></div>
+              </section>
+
+              <section class="panel panel-stack">
+                <div class="panel-header compact">
+                  <div>
+                    <p class="panel-kicker">Live tasks</p>
+                    <h2>Recent fragment execution</h2>
+                  </div>
+                </div>
+                <div class="task-stream" id="task-stream"></div>
+              </section>
+            </section>
+
+            <section class="panel-grid lower-grid">
+              <section class="panel panel-stack">
+                <div class="panel-header compact">
+                  <div>
+                    <p class="panel-kicker">Coordinator log</p>
+                    <h2>Failures, retries, and score movement</h2>
+                  </div>
+                </div>
+                <div class="log-console" id="log-console"></div>
+              </section>
+
+              <section class="panel panel-stack">
+                <div class="panel-header compact">
+                  <div>
+                    <p class="panel-kicker">Replica detail</p>
+                    <h2>Shard and replica distribution</h2>
+                  </div>
+                </div>
+                <div class="lane-list" id="lane-list"></div>
+              </section>
+            </section>
           </section>
 
-          <section class="panel panel-stack">
-            <div class="panel-header compact">
-              <div>
-                <p class="panel-kicker">Live tasks</p>
-                <h2>Recent fragment execution</h2>
+          <section class="view-panel admin-view" data-view-panel="api-keys" hidden>
+            <section class="panel admin-hero">
+              <div class="panel-header">
+                <div>
+                  <p class="panel-kicker">Admin</p>
+                  <h2>API key lifecycle</h2>
+                </div>
+                <p class="panel-note">Visible only to super_admin sessions</p>
               </div>
-            </div>
-            <div class="task-stream" id="task-stream"></div>
-          </section>
-        </section>
+              <p class="subcopy compact-copy">
+                Create viewer, operator, and super_admin credentials, keep expirations explicit, and revoke access without leaving the dashboard.
+              </p>
+              <p class="message-banner" id="admin-message" hidden></p>
+            </section>
 
-        <section class="panel-grid lower-grid">
-          <section class="panel panel-stack">
-            <div class="panel-header compact">
-              <div>
-                <p class="panel-kicker">Coordinator log</p>
-                <h2>Failures, retries, and score movement</h2>
-              </div>
-            </div>
-            <div class="log-console" id="log-console"></div>
-          </section>
+            <section class="admin-grid">
+              <section class="panel panel-stack">
+                <div class="panel-header compact">
+                  <div>
+                    <p class="panel-kicker">Create key</p>
+                    <h2>Provision a scoped credential</h2>
+                  </div>
+                </div>
+                <form class="api-key-form" id="api-key-create-form">
+                  <label class="field-stack">
+                    <span class="mini-label">Role</span>
+                    <select id="api-key-role">
+                      <option value="viewer">viewer</option>
+                      <option value="operator">operator</option>
+                      <option value="super_admin">super_admin</option>
+                    </select>
+                  </label>
+                  <label class="field-stack">
+                    <span class="mini-label">Expires at</span>
+                    <input id="api-key-expires-at" type="datetime-local" required />
+                  </label>
+                  <div class="form-actions">
+                    <button class="primary-button" type="submit" id="create-api-key-button">Create API key</button>
+                  </div>
+                </form>
+              </section>
 
-          <section class="panel panel-stack">
-            <div class="panel-header compact">
-              <div>
-                <p class="panel-kicker">Replica detail</p>
-                <h2>Shard and replica distribution</h2>
-              </div>
-            </div>
-            <div class="lane-list" id="lane-list"></div>
+              <section class="panel panel-stack">
+                <div class="panel-header compact">
+                  <div>
+                    <p class="panel-kicker">Managed keys</p>
+                    <h2>Active and historical credentials</h2>
+                  </div>
+                  <button class="ghost-button" type="button" id="refresh-api-keys-button">Refresh</button>
+                </div>
+                <div class="api-key-list" id="api-key-list"></div>
+              </section>
+            </section>
           </section>
         </section>
       </main>

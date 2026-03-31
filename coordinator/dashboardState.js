@@ -19,6 +19,87 @@ function createBoundedStore(limit) {
   };
 }
 
+function normalizeListFilter(values) {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+
+  return values
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+}
+
+function filterNodes(nodes, filters = {}) {
+  const shardId = String(filters.shardId || "").trim();
+  const replicaGroup = String(filters.replicaGroup || "").trim();
+  const statusFilters = normalizeListFilter(filters.statuses);
+
+  return (Array.isArray(nodes) ? nodes : []).filter((node) => {
+    if (shardId && node.shardId !== shardId) {
+      return false;
+    }
+
+    if (replicaGroup && node.replicaGroup !== replicaGroup) {
+      return false;
+    }
+
+    if (statusFilters.length > 0 && !statusFilters.includes(node.status)) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
+function filterExecutions(executions, filters = {}) {
+  const shardId = String(filters.shardId || "").trim();
+  const replicaGroup = String(filters.replicaGroup || "").trim();
+
+  return (Array.isArray(executions) ? executions : []).filter((execution) => {
+    if (shardId && !(execution.shardIds || []).includes(shardId)) {
+      return false;
+    }
+
+    if (replicaGroup && execution.replicaGroup !== replicaGroup) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
+function logMatchesFilters(entry, filters = {}) {
+  const shardId = String(filters.shardId || "").trim();
+  const replicaGroup = String(filters.replicaGroup || "").trim();
+  const typeFilters = normalizeListFilter(filters.logTypes);
+  const levelFilters = normalizeListFilter(filters.logLevels);
+
+  if (typeFilters.length > 0 && !typeFilters.includes(entry.type)) {
+    return false;
+  }
+
+  if (levelFilters.length > 0 && !levelFilters.includes(entry.level)) {
+    return false;
+  }
+
+  if (!shardId && !replicaGroup) {
+    return true;
+  }
+
+  const candidates = [
+    entry.metadata?.node,
+    entry.metadata?.failedNode,
+    entry.metadata?.matchedNode,
+  ].filter(Boolean);
+
+  const hasShardMatch = !shardId || candidates.some((candidate) => candidate.shardId === shardId)
+    || entry.metadata?.shardId === shardId;
+  const hasReplicaMatch = !replicaGroup || candidates.some((candidate) => candidate.replicaGroup === replicaGroup)
+    || entry.metadata?.replicaGroup === replicaGroup;
+
+  return hasShardMatch && hasReplicaMatch;
+}
+
 function groupNodeSummaries(nodes, keyName) {
   const groups = new Map();
 
@@ -155,40 +236,68 @@ function createDashboardState(options = {}) {
     });
   }
 
-  function getStats(nodes = nodesSnapshot) {
-    const allNodes = Array.isArray(nodes) ? nodes : [];
-    const replicaGroups = groupNodeSummaries(allNodes, "replicaGroup");
-    const shardSummaries = groupNodeSummaries(allNodes, "shardId");
+  function getLogs(limit = 100, filters = {}) {
+    return logStore.list().filter((entry) => logMatchesFilters(entry, filters)).slice(0, limit);
+  }
+
+  function getExecutions(limit = 24, filters = {}) {
+    return filterExecutions(executionStore.list(), filters).slice(0, limit);
+  }
+
+  function getFilterOptions() {
+    const nodes = nodesSnapshot;
+    const logs = logStore.list();
+
+    return {
+      shardIds: [...new Set(nodes.map((node) => node.shardId).filter(Boolean))].sort(),
+      replicaGroups: [...new Set(nodes.map((node) => node.replicaGroup).filter(Boolean))].sort(),
+      logTypes: [...new Set(logs.map((entry) => entry.type).filter(Boolean))].sort(),
+      logLevels: [...new Set(logs.map((entry) => entry.level).filter(Boolean))].sort(),
+      eventTypes: ["snapshot", "node.update", "score.change", "task.execution", "log.append"],
+    };
+  }
+
+  function getStats(nodes = nodesSnapshot, filters = {}) {
+    const filteredNodes = filterNodes(nodes, filters);
+    const replicaGroups = groupNodeSummaries(filteredNodes, "replicaGroup");
+    const shardSummaries = groupNodeSummaries(filteredNodes, "shardId");
+    const filteredExecutions = getExecutions(24, filters);
+    const filteredLogs = getLogs(logStore.list().length, filters);
     const summary = {
-      totalNodes: allNodes.length,
-      activeNodes: allNodes.filter((node) => node.status === "active").length,
-      probationNodes: allNodes.filter((node) => node.status === "probation").length,
-      inactiveNodes: allNodes.filter((node) => node.status === "inactive").length,
-      totalTasksHandled: allNodes.reduce((sum, node) => sum + Number(node.totalTasks || 0), 0),
+      totalNodes: filteredNodes.length,
+      activeNodes: filteredNodes.filter((node) => node.status === "active").length,
+      probationNodes: filteredNodes.filter((node) => node.status === "probation").length,
+      inactiveNodes: filteredNodes.filter((node) => node.status === "inactive").length,
+      totalTasksHandled: filteredNodes.reduce((sum, node) => sum + Number(node.totalTasks || 0), 0),
       averageScore:
-        allNodes.length === 0
+        filteredNodes.length === 0
           ? 0
           : Math.round(
-            allNodes.reduce((sum, node) => sum + Number(node.score || 0), 0) / allNodes.length,
+            filteredNodes.reduce((sum, node) => sum + Number(node.score || 0), 0) / filteredNodes.length,
           ),
-      recentFailures: logStore.list(100).filter((entry) => entry.level === "warn" || entry.level === "error").length,
+      recentFailures: filteredLogs.filter((entry) => entry.level === "warn" || entry.level === "error").length,
     };
 
     return {
       summary,
       replicaGroups,
       shardSummaries,
-      recentExecutions: executionStore.list(24),
-      logCount: logStore.list().length,
+      recentExecutions: filteredExecutions,
+      logCount: filteredLogs.length,
       lastUpdatedAt: Date.now(),
+      appliedFilters: {
+        shardId: String(filters.shardId || ""),
+        replicaGroup: String(filters.replicaGroup || ""),
+      },
     };
   }
 
-  function getSnapshot() {
+  function getSnapshot(filters = {}) {
     return {
-      nodes: nodesSnapshot,
-      stats: getStats(nodesSnapshot),
-      logs: logStore.list(40),
+      nodes: filterNodes(nodesSnapshot, filters),
+      stats: getStats(nodesSnapshot, filters),
+      logs: getLogs(40, filters),
+      filters: getFilterOptions(),
     };
   }
 
@@ -200,19 +309,17 @@ function createDashboardState(options = {}) {
   }
 
   return {
+    filterNodes,
+    getExecutions,
+    getFilterOptions,
+    getLogs,
+    getSnapshot,
+    getStats,
     recordLog,
     recordScoreChange,
     recordSearchExecution,
     setNodes,
     subscribe,
-    getSnapshot,
-    getLogs(limit) {
-      return logStore.list(limit);
-    },
-    getExecutions(limit) {
-      return executionStore.list(limit);
-    },
-    getStats,
   };
 }
 

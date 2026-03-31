@@ -57,9 +57,10 @@
             <nav class="sidebar-nav">
               <button class="rail-button active" type="button" data-view-button="overview">Overview</button>
               <button class="rail-button" type="button" id="api-keys-nav-item" data-view-button="api-keys" hidden>API Keys</button>
+              <button class="rail-button" type="button" id="audit-logs-nav-item" data-view-button="audit-logs" hidden>Audit Logs</button>
             </nav>
             <p class="subcopy compact-copy sidebar-copy">
-              Keep the network pulse live in one place, then move into key management only when you need to operate the control plane.
+              Keep the network pulse live in one place, then move into key management and audit oversight only when you need to operate the control plane.
             </p>
           </section>
 
@@ -239,6 +240,47 @@
                 </div>
                 <div class="api-key-list" id="api-key-list"></div>
               </section>
+            </section>
+          </section>
+
+          <section class="view-panel admin-view" data-view-panel="audit-logs" hidden>
+            <section class="panel admin-hero">
+              <div class="panel-header">
+                <div>
+                  <p class="panel-kicker">Admin</p>
+                  <h2>Audit log viewer</h2>
+                </div>
+                <p class="panel-note">Visible only to super_admin sessions</p>
+              </div>
+              <p class="subcopy compact-copy">
+                Track key lifecycle and session activity with sanitized event records, focused filters, and a continuously refreshed control-plane view.
+              </p>
+              <p class="message-banner" id="audit-message" hidden></p>
+            </section>
+
+            <section class="panel panel-stack audit-panel">
+              <div class="panel-header compact">
+                <div>
+                  <p class="panel-kicker">Audit feed</p>
+                  <h2>Administrative activity</h2>
+                </div>
+                <button class="ghost-button" type="button" id="refresh-audit-logs-button">Refresh</button>
+              </div>
+              <div class="audit-filter-bar">
+                <label class="field-stack narrow-field">
+                  <span class="mini-label">Event type</span>
+                  <select id="audit-event-filter"></select>
+                </label>
+                <label class="field-stack narrow-field">
+                  <span class="mini-label">Time range</span>
+                  <select id="audit-time-filter">
+                    <option value="1h">Last 1 hour</option>
+                    <option value="24h">Last 24 hours</option>
+                    <option value="all">All time</option>
+                  </select>
+                </label>
+              </div>
+              <div class="audit-table" id="audit-log-table"></div>
             </section>
           </section>
         </section>

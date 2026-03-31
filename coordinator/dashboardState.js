@@ -1,3 +1,11 @@
+﻿const AUDIT_EVENT_TYPE_MAP = {
+  "auth.api_key.create": "key.create",
+  "auth.api_key.revoke": "key.revoke",
+  "auth.session.create": "session.login",
+  "auth.session.renew": "session.renew",
+  "auth.session.logout": "session.logout",
+};
+
 function createBoundedStore(limit) {
   const items = [];
 
@@ -147,6 +155,91 @@ function groupNodeSummaries(nodes, keyName) {
     .sort((left, right) => left.key.localeCompare(right.key));
 }
 
+function normalizeAuditFilters(filters = {}) {
+  const since = Number(filters.since || 0);
+
+  return {
+    eventTypes: normalizeListFilter(filters.eventTypes),
+    since: Number.isFinite(since) && since > 0 ? since : 0,
+  };
+}
+
+function isAuditLogEntry(entry) {
+  return Boolean(AUDIT_EVENT_TYPE_MAP[entry.type]);
+}
+
+function buildAuditActor(metadata = {}) {
+  const actorRole = String(metadata.actorRole || metadata.role || "system").trim();
+  const actorKey = String(metadata.actorKey || "").trim();
+
+  if (actorKey) {
+    return `${actorRole} ${actorKey}`;
+  }
+
+  return actorRole || "system";
+}
+
+function sanitizeAuditDetails(metadata = {}) {
+  const detailKeys = [
+    "actorKey",
+    "actorRole",
+    "key",
+    "role",
+    "status",
+    "expiresAt",
+    "keyExpiresAt",
+    "sessionExpiresAt",
+  ];
+
+  return detailKeys.reduce((details, key) => {
+    if (metadata[key] !== undefined && metadata[key] !== null && metadata[key] !== "") {
+      details[key] = metadata[key];
+    }
+
+    return details;
+  }, {});
+}
+
+function buildAuditSummary(eventType, details = {}) {
+  switch (eventType) {
+    case "key.create":
+      return `Created ${details.role || "managed"} key ${details.key || ""}`.trim();
+    case "key.revoke":
+      return `Revoked ${details.role || "managed"} key ${details.key || ""}`.trim();
+    case "session.login":
+      return `Opened ${details.role || "unknown"} dashboard session`;
+    case "session.logout":
+      return `Closed ${details.role || "unknown"} dashboard session`;
+    case "session.renew":
+      return `Renewed ${details.role || "unknown"} dashboard session`;
+    default:
+      return "Recorded audit event";
+  }
+}
+
+function buildAuditSeverity(eventType) {
+  if (eventType === "key.revoke") {
+    return "warn";
+  }
+
+  return "info";
+}
+
+function mapAuditLog(entry) {
+  const eventType = AUDIT_EVENT_TYPE_MAP[entry.type];
+  const details = sanitizeAuditDetails(entry.metadata || {});
+
+  return {
+    id: entry.id,
+    eventType,
+    timestamp: entry.timestamp,
+    actor: buildAuditActor(entry.metadata || {}),
+    summary: buildAuditSummary(eventType, details),
+    details,
+    severity: buildAuditSeverity(eventType),
+  };
+}
+
 function createDashboardState(options = {}) {
   const logStore = createBoundedStore(options.maxLogs ?? 250);
   const executionStore = createBoundedStore(options.maxExecutions ?? 120);
@@ -244,6 +337,26 @@ function createDashboardState(options = {}) {
     return filterExecutions(executionStore.list(), filters).slice(0, limit);
   }
 
+  function getAuditLogs(limit = 100, filters = {}) {
+    const normalizedFilters = normalizeAuditFilters(filters);
+
+    return logStore.list()
+      .filter(isAuditLogEntry)
+      .map(mapAuditLog)
+      .filter((entry) => {
+        if (normalizedFilters.eventTypes.length > 0 && !normalizedFilters.eventTypes.includes(entry.eventType)) {
+          return false;
+        }
+
+        if (normalizedFilters.since > 0 && entry.timestamp < normalizedFilters.since) {
+          return false;
+        }
+
+        return true;
+      })
+      .slice(0, limit);
+  }
+
   function getFilterOptions() {
     const nodes = nodesSnapshot;
     const logs = logStore.list();
@@ -254,6 +367,12 @@ function createDashboardState(options = {}) {
       logTypes: [...new Set(logs.map((entry) => entry.type).filter(Boolean))].sort(),
       logLevels: [...new Set(logs.map((entry) => entry.level).filter(Boolean))].sort(),
       eventTypes: ["snapshot", "node.update", "score.change", "task.execution", "log.append"],
+      auditEventTypes: [...new Set(
+        logs
+          .filter(isAuditLogEntry)
+          .map((entry) => AUDIT_EVENT_TYPE_MAP[entry.type])
+          .filter(Boolean),
+      )].sort(),
     };
   }
 
@@ -310,6 +429,7 @@ function createDashboardState(options = {}) {
 
   return {
     filterNodes,
+    getAuditLogs,
     getExecutions,
     getFilterOptions,
     getLogs,

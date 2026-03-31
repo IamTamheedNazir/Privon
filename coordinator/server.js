@@ -200,6 +200,15 @@ function buildSessionPayload(request) {
   };
 }
 
+function parseAuditLogFilters(query = {}) {
+  const since = Number(query.since || 0);
+
+  return {
+    eventTypes: parseCsvFilter(query.eventTypes || query.eventType),
+    since: Number.isFinite(since) && since > 0 ? since : 0,
+  };
+}
+
 function buildDashboardEventPayload(event, filters, payload) {
   const filtersOnly = {
     shardId: filters.shardId,
@@ -366,6 +375,8 @@ app.post("/dashboard/session", (request, response) => {
       type: "auth.session.create",
       metadata: {
         role: session.role,
+        actorRole: request.auth?.role || session.role,
+        actorKey: maskApiKeyValue(request.auth?.key),
         keyExpiresAt: session.keyExpiresAt,
         sessionExpiresAt: session.expiresAt,
       },
@@ -391,6 +402,8 @@ app.post("/dashboard/session/renew", (request, response) => {
       type: "auth.session.renew",
       metadata: {
         role: session.role,
+        actorRole: request.auth?.role || session.role,
+        actorKey: maskApiKeyValue(request.auth?.key),
         keyExpiresAt: session.keyExpiresAt,
         sessionExpiresAt: session.expiresAt,
       },
@@ -413,6 +426,8 @@ app.post("/dashboard/logout", (request, response) => {
       type: "auth.session.logout",
       metadata: {
         role: sessionPrincipal.ok ? sessionPrincipal.principal.role : "unknown",
+        actorRole: sessionPrincipal.ok ? sessionPrincipal.principal.role : "unknown",
+        actorKey: sessionPrincipal.ok ? maskApiKeyValue(sessionPrincipal.principal.key) : "",
       },
     },
   );
@@ -543,6 +558,7 @@ app.post("/admin/api-keys/create", (request, response) => {
         type: "auth.api_key.create",
         metadata: {
           actorRole: request.auth?.role || "unknown",
+          actorKey: maskApiKeyValue(request.auth?.key),
           key: maskApiKeyValue(apiKey.key),
           role: apiKey.role,
           status: apiKey.status,
@@ -571,6 +587,19 @@ app.get("/admin/api-keys", (request, response) => {
   });
 });
 
+app.get("/admin/audit-logs", (request, response) => {
+  const limit = Number(request.query?.limit || 150);
+  const filters = parseAuditLogFilters(request.query);
+
+  response.json({
+    auditLogs: dashboardState.getAuditLogs(limit, filters),
+    filterOptions: {
+      eventTypes: dashboardState.getFilterOptions().auditEventTypes || [],
+    },
+    lastUpdatedAt: Date.now(),
+  });
+});
+
 app.post("/admin/api-keys/revoke", (request, response) => {
   const revokedApiKey = coordinatorStore.revokeApiKey(request.body?.key);
 
@@ -586,6 +615,7 @@ app.post("/admin/api-keys/revoke", (request, response) => {
       type: "auth.api_key.revoke",
       metadata: {
         actorRole: request.auth?.role || "unknown",
+        actorKey: maskApiKeyValue(request.auth?.key),
         key: maskApiKeyValue(revokedApiKey.key),
         role: revokedApiKey.role,
         status: revokedApiKey.status,
@@ -773,4 +803,5 @@ cleanupTimer.unref();
 app.listen(port, () => {
   emitCoordinatorLog(`[coordinator] listening on port ${port}`);
 });
+
 

@@ -1,16 +1,23 @@
-﻿const THEMES = [
+const THEMES = [
   { id: "nocturne", label: "Nocturne" },
   { id: "voltage", label: "Voltage" },
   { id: "paper", label: "Paper" },
 ];
 const EVENT_TYPES = ["node.update", "score.change", "task.execution", "log.append"];
 const HUMAN_API_KEY_ROLES = ["viewer", "operator", "super_admin"];
+const AUDIT_TIME_RANGES = {
+  "1h": 1000 * 60 * 60,
+  "24h": 1000 * 60 * 60 * 24,
+  all: 0,
+};
 const VIEW_IDS = {
   OVERVIEW: "overview",
   API_KEYS: "api-keys",
+  AUDIT_LOGS: "audit-logs",
 };
 const API_KEY_STORAGE_KEY = "privon-dashboard-api-key";
 const STREAM_RECONNECT_DELAY_MS = 2500;
+const AUDIT_REFRESH_INTERVAL_MS = 5000;
 
 const state = {
   theme: localStorage.getItem("privon-theme") || "nocturne",
@@ -19,6 +26,7 @@ const state = {
   eventSource: null,
   reconnectTimer: null,
   renewalTimer: null,
+  auditRefreshTimer: null,
   view: VIEW_IDS.OVERVIEW,
   filterOptions: {
     shardIds: [],
@@ -40,6 +48,18 @@ const state = {
     message: "",
     tone: "info",
     revealedKeys: {},
+  },
+  audit: {
+    logs: [],
+    filterOptions: {
+      eventTypes: [],
+    },
+    filters: {
+      eventType: "",
+      timeRange: "24h",
+    },
+    message: "",
+    tone: "info",
   },
   snapshot: {
     nodes: [],
@@ -81,6 +101,7 @@ const focusCopy = document.getElementById("focus-copy");
 const viewButtons = Array.from(document.querySelectorAll("[data-view-button]"));
 const viewPanels = Array.from(document.querySelectorAll("[data-view-panel]"));
 const apiKeysNavItem = document.getElementById("api-keys-nav-item");
+const auditLogsNavItem = document.getElementById("audit-logs-nav-item");
 const adminMessage = document.getElementById("admin-message");
 const apiKeyList = document.getElementById("api-key-list");
 const apiKeyCreateForm = document.getElementById("api-key-create-form");
@@ -88,6 +109,11 @@ const apiKeyRoleInput = document.getElementById("api-key-role");
 const apiKeyExpiresAtInput = document.getElementById("api-key-expires-at");
 const createApiKeyButton = document.getElementById("create-api-key-button");
 const refreshApiKeysButton = document.getElementById("refresh-api-keys-button");
+const auditMessage = document.getElementById("audit-message");
+const auditEventFilter = document.getElementById("audit-event-filter");
+const auditTimeFilter = document.getElementById("audit-time-filter");
+const refreshAuditLogsButton = document.getElementById("refresh-audit-logs-button");
+const auditLogTable = document.getElementById("audit-log-table");
 
 function formatRelativeTime(timestamp) {
   if (!timestamp) {
@@ -143,6 +169,12 @@ function toDatetimeLocalValue(timestamp) {
 
 function humanizeRole(role) {
   return String(role || "viewer").replaceAll("_", " ");
+}
+
+function humanizeEventType(eventType) {
+  return String(eventType || "activity")
+    .replaceAll(".", " ")
+    .replaceAll("_", " ");
 }
 
 function isSuperAdmin() {
@@ -246,11 +278,12 @@ function renderSession() {
 }
 
 function syncViewPanels() {
-  if (!isSuperAdmin() && state.view === VIEW_IDS.API_KEYS) {
+  if (!isSuperAdmin() && [VIEW_IDS.API_KEYS, VIEW_IDS.AUDIT_LOGS].includes(state.view)) {
     state.view = VIEW_IDS.OVERVIEW;
   }
 
   apiKeysNavItem.hidden = !isSuperAdmin();
+  auditLogsNavItem.hidden = !isSuperAdmin();
 
   viewButtons.forEach((button) => {
     const isActive = button.dataset.viewButton === state.view;
@@ -276,6 +309,22 @@ function setAdminMessage(message = "", tone = "info") {
   adminMessage.hidden = false;
   adminMessage.textContent = message;
   adminMessage.className = `message-banner tone-${tone}`;
+}
+
+function setAuditMessage(message = "", tone = "info") {
+  state.audit.message = message;
+  state.audit.tone = tone;
+
+  if (!message) {
+    auditMessage.hidden = true;
+    auditMessage.textContent = "";
+    auditMessage.className = "message-banner";
+    return;
+  }
+
+  auditMessage.hidden = false;
+  auditMessage.textContent = message;
+  auditMessage.className = `message-banner tone-${tone}`;
 }
 
 function renderSummary(stats) {
@@ -611,6 +660,70 @@ function renderApiKeys() {
   });
 }
 
+
+function getAuditSinceForRange(timeRange) {
+  const offset = AUDIT_TIME_RANGES[timeRange] ?? AUDIT_TIME_RANGES["24h"];
+  return offset > 0 ? Date.now() - offset : 0;
+}
+
+function renderAuditFilters() {
+  if (!isSuperAdmin()) {
+    auditEventFilter.innerHTML = '<option value="">All event types</option>';
+    auditTimeFilter.value = "24h";
+    return;
+  }
+
+  const eventTypes = ["", ...(state.audit.filterOptions.eventTypes || [])
+    .filter((value) => value !== state.audit.filters.eventType)];
+
+  auditEventFilter.innerHTML = eventTypes.map((eventType) => `
+    <option value="${eventType}">${eventType || "All event types"}</option>
+  `).join("");
+  auditEventFilter.value = state.audit.filters.eventType;
+  auditTimeFilter.value = state.audit.filters.timeRange;
+}
+
+function renderAuditLogs() {
+  if (!isSuperAdmin()) {
+    auditLogTable.innerHTML = createEmptyState("Only super_admin sessions can view audit logs.");
+    return;
+  }
+
+  if (!state.audit.logs.length) {
+    auditLogTable.innerHTML = createEmptyState("No audit activity matched the current filter set.");
+    return;
+  }
+
+  auditLogTable.innerHTML = `
+    <div class="audit-row audit-header">
+      <span>Time</span>
+      <span>Event Type</span>
+      <span>Actor</span>
+      <span>Summary</span>
+    </div>
+    ${state.audit.logs.map((entry) => `
+      <article class="audit-row severity-${entry.severity || "info"}">
+        <div class="audit-cell">
+          <strong>${formatDateTime(entry.timestamp)}</strong>
+          <span class="meta">${formatRelativeTime(entry.timestamp)}</span>
+        </div>
+        <div class="audit-cell">
+          <span class="inline-tag">${entry.eventType}</span>
+          <span class="meta">${humanizeEventType(entry.eventType)}</span>
+        </div>
+        <div class="audit-cell">
+          <strong>${entry.actor || "system"}</strong>
+        </div>
+        <div class="audit-cell">
+          <strong>${entry.summary || "No summary available."}</strong>
+          <span class="meta">${Object.entries(entry.details || {})
+            .map(([key, value]) => `${key}: ${value}`)
+            .join(" · ") || "No additional details."}</span>
+        </div>
+      </article>
+    `).join("")}
+  `;
+}
 function render(snapshot) {
   const nodes = snapshot.nodes || [];
   const stats = snapshot.stats || {};
@@ -627,6 +740,8 @@ function render(snapshot) {
   renderShardCharts(stats.shardSummaries || []);
   renderFocusCard(stats);
   renderApiKeys();
+  renderAuditFilters();
+  renderAuditLogs();
   attachDrilldownHandlers();
   setLastUpdated(stats.lastUpdatedAt || Date.now());
 }
@@ -657,6 +772,11 @@ function clearTimers() {
   if (state.renewalTimer) {
     window.clearTimeout(state.renewalTimer);
     state.renewalTimer = null;
+  }
+
+  if (state.auditRefreshTimer) {
+    window.clearInterval(state.auditRefreshTimer);
+    state.auditRefreshTimer = null;
   }
 }
 
@@ -745,6 +865,85 @@ async function loadApiKeys(options = {}) {
   }
 }
 
+
+function buildAuditQuery() {
+  const query = new URLSearchParams();
+  const since = getAuditSinceForRange(state.audit.filters.timeRange);
+
+  if (state.audit.filters.eventType) {
+    query.set("eventType", state.audit.filters.eventType);
+  }
+
+  if (since > 0) {
+    query.set("since", String(since));
+  }
+
+  query.set("limit", "150");
+  return `?${query.toString()}`;
+}
+
+async function loadAuditLogs(options = {}) {
+  if (!isSuperAdmin()) {
+    state.audit.logs = [];
+    state.audit.filterOptions = { eventTypes: [] };
+    renderAuditFilters();
+    renderAuditLogs();
+    return;
+  }
+
+  const silent = options.silent ?? false;
+
+  try {
+    const response = await fetchJson(`/admin/audit-logs${buildAuditQuery()}`);
+    state.audit.logs = response.auditLogs || [];
+    state.audit.filterOptions = {
+      eventTypes: response.filterOptions?.eventTypes || [],
+    };
+    renderAuditFilters();
+    renderAuditLogs();
+
+    if (!silent) {
+      setAuditMessage(`Loaded ${state.audit.logs.length} audit event${state.audit.logs.length === 1 ? "" : "s"}.`, "success");
+    }
+  } catch (error) {
+    renderAuditFilters();
+    renderAuditLogs();
+
+    if (!silent) {
+      setAuditMessage(
+        error.message === "Forbidden"
+          ? "Only super_admin sessions can view audit logs."
+          : `Unable to load audit logs: ${error.message}`,
+        "error",
+      );
+    }
+
+    if (error.message === "Unauthorized") {
+      await logout(false);
+    }
+  }
+}
+
+function startAuditRefresh() {
+  if (!isSuperAdmin() || state.view !== VIEW_IDS.AUDIT_LOGS) {
+    return;
+  }
+
+  if (state.auditRefreshTimer) {
+    window.clearInterval(state.auditRefreshTimer);
+  }
+
+  state.auditRefreshTimer = window.setInterval(() => {
+    loadAuditLogs({ silent: true }).catch((error) => console.error(error));
+  }, AUDIT_REFRESH_INTERVAL_MS);
+}
+
+function stopAuditRefresh() {
+  if (state.auditRefreshTimer) {
+    window.clearInterval(state.auditRefreshTimer);
+    state.auditRefreshTimer = null;
+  }
+}
 async function loadSnapshot() {
   const query = buildFilterQuery(false);
   const [meta, nodes, stats, logs] = await Promise.all([
@@ -769,6 +968,10 @@ async function loadSnapshot() {
 
   if (isSuperAdmin() && state.view === VIEW_IDS.API_KEYS) {
     await loadApiKeys({ silent: true });
+  }
+
+  if (isSuperAdmin() && state.view === VIEW_IDS.AUDIT_LOGS) {
+    await loadAuditLogs({ silent: true });
   }
 
   scheduleSessionRenewal();
@@ -804,6 +1007,10 @@ function handleStreamEvent(eventName, payload) {
     updateSnapshot({
       logs: payload.logs || state.snapshot.logs,
     });
+
+    if (isSuperAdmin() && state.view === VIEW_IDS.AUDIT_LOGS) {
+      loadAuditLogs({ silent: true }).catch((error) => console.error(error));
+    }
     return;
   }
 
@@ -879,6 +1086,10 @@ async function establishSession(apiKey) {
     await loadSnapshot();
     if (isSuperAdmin()) {
       await loadApiKeys({ silent: true });
+      if (state.view === VIEW_IDS.AUDIT_LOGS) {
+        await loadAuditLogs({ silent: true });
+        startAuditRefresh();
+      }
     }
     connectStream();
   } finally {
@@ -939,6 +1150,18 @@ async function logout(callApi = true) {
     tone: "info",
     revealedKeys: {},
   };
+  state.audit = {
+    logs: [],
+    filterOptions: {
+      eventTypes: [],
+    },
+    filters: {
+      eventType: "",
+      timeRange: "24h",
+    },
+    message: "",
+    tone: "info",
+  };
   state.snapshot = {
     nodes: [],
     stats: { summary: {}, replicaGroups: [], shardSummaries: [], recentExecutions: [] },
@@ -950,7 +1173,10 @@ async function logout(callApi = true) {
   renderSession();
   syncViewPanels();
   setAdminMessage("");
+  setAuditMessage("");
   renderApiKeys();
+  renderAuditFilters();
+  renderAuditLogs();
   setConnectionState("locked", "Dashboard session cleared.");
 }
 
@@ -971,11 +1197,24 @@ async function switchView(viewId) {
     return;
   }
 
+  if (viewId === VIEW_IDS.AUDIT_LOGS && !isSuperAdmin()) {
+    setAuditMessage("Only super_admin sessions can view audit logs.", "error");
+    state.view = VIEW_IDS.OVERVIEW;
+    syncViewPanels();
+    return;
+  }
+
   state.view = viewId;
   syncViewPanels();
+  stopAuditRefresh();
 
   if (state.view === VIEW_IDS.API_KEYS) {
     await loadApiKeys({ silent: true });
+  }
+
+  if (state.view === VIEW_IDS.AUDIT_LOGS) {
+    await loadAuditLogs({ silent: true });
+    startAuditRefresh();
   }
 }
 
@@ -1067,8 +1306,11 @@ async function bootstrap() {
   renderSession();
   syncViewPanels();
   setAdminMessage("");
+  setAuditMessage("");
   apiKeyRoleInput.value = "viewer";
   apiKeyExpiresAtInput.value = toDatetimeLocalValue(Date.now() + (1000 * 60 * 60 * 24 * 30));
+  renderAuditFilters();
+  renderAuditLogs();
 
   if (state.apiKey) {
     apiKeyInput.value = state.apiKey;
@@ -1080,6 +1322,10 @@ async function bootstrap() {
     await loadSnapshot();
     if (isSuperAdmin()) {
       await loadApiKeys({ silent: true });
+      if (state.view === VIEW_IDS.AUDIT_LOGS) {
+        await loadAuditLogs({ silent: true });
+        startAuditRefresh();
+      }
     }
     connectStream();
     return;
@@ -1160,6 +1406,20 @@ apiKeyCreateForm.addEventListener("submit", async (event) => {
 
 refreshApiKeysButton.addEventListener("click", async () => {
   await loadApiKeys({ silent: false });
+});
+
+auditEventFilter.addEventListener("change", async () => {
+  state.audit.filters.eventType = auditEventFilter.value;
+  await loadAuditLogs({ silent: true });
+});
+
+auditTimeFilter.addEventListener("change", async () => {
+  state.audit.filters.timeRange = auditTimeFilter.value;
+  await loadAuditLogs({ silent: true });
+});
+
+refreshAuditLogsButton.addEventListener("click", async () => {
+  await loadAuditLogs({ silent: false });
 });
 
 window.addEventListener("beforeunload", () => {

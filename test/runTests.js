@@ -472,6 +472,44 @@ async function main() {
     unsubscribe();
   });
 
+
+  await runTest("dashboard state maps sanitized audit logs", () => {
+    const dashboardState = createDashboardState({ maxLogs: 10 });
+
+    dashboardState.recordLog({
+      type: "auth.api_key.create",
+      message: "api key created",
+      metadata: {
+        actorRole: "super_admin",
+        actorKey: "****abcd",
+        key: "****wxyz",
+        role: "viewer",
+        expiresAt: 999999,
+      },
+      timestamp: 5000,
+    });
+    dashboardState.recordLog({
+      type: "auth.session.logout",
+      message: "dashboard session closed",
+      metadata: {
+        role: "super_admin",
+        actorRole: "super_admin",
+        actorKey: "****abcd",
+      },
+      timestamp: 7000,
+    });
+
+    const auditLogs = dashboardState.getAuditLogs(10, {
+      eventTypes: ["key.create"],
+      since: 4000,
+    });
+
+    assert.equal(auditLogs.length, 1);
+    assert.equal(auditLogs[0].eventType, "key.create");
+    assert.equal(auditLogs[0].actor, "super_admin ****abcd");
+    assert.equal(auditLogs[0].summary.includes("Created viewer key"), true);
+    assert.equal(auditLogs[0].details.key, "****wxyz");
+  });
   await runTest("distributeFragments verifies matching redundant results", async () => {
     const originalFetch = global.fetch;
     const attemptedUrls = [];
@@ -1149,6 +1187,7 @@ async function main() {
 }
 
 main();
+
 
 
 

@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   --bg: #07111e;
   --panel: rgba(12, 25, 40, 0.78);
   --panel-strong: rgba(18, 34, 52, 0.94);
@@ -757,6 +757,65 @@ input[type="datetime-local"]:focus {
   text-align: center;
 }
 
+.audit-shell {
+  display: grid;
+  gap: 18px;
+}
+
+.audit-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.audit-table {
+  display: grid;
+  gap: 10px;
+  max-height: 640px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.audit-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.85fr) minmax(180px, 0.9fr) minmax(0, 1.5fr);
+  gap: 14px;
+  padding: 16px;
+  border-radius: 20px;
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--panel-strong), transparent);
+  align-items: start;
+}
+
+.audit-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel-strong);
+  backdrop-filter: blur(20px);
+  text-transform: uppercase;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.audit-cell {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.severity-warn {
+  border-color: rgba(255, 154, 98, 0.32);
+  background: linear-gradient(180deg, rgba(255, 154, 98, 0.14), transparent);
+}
+
+.severity-error {
+  border-color: rgba(255, 108, 139, 0.3);
+  background: linear-gradient(180deg, rgba(255, 108, 139, 0.16), transparent);
+}
 [hidden] {
   display: none !important;
 }
